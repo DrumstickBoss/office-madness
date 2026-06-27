@@ -1,8 +1,11 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
 
-// ─── Canvas dimensions ───────────────────────────────────────────────────────
-const CW = 720
-const CH = 480
+// ─── Canvas dimensions (mutable — updated on orientation change) ─────────────
+const isPortraitViewport = () =>
+  typeof window !== 'undefined' && window.innerWidth < window.innerHeight
+
+let CW = isPortraitViewport() ? 390 : 720
+let CH = isPortraitViewport() ? 700 : 480
 
 // ─── Game tuning ─────────────────────────────────────────────────────────────
 const PLAYER_W = 54
@@ -19,6 +22,36 @@ const SCORE_TRAP = -15
 const SCORE_LEGIT_ANSWER = 20     // bonus for correctly answering legit call
 const SCORE_LEGIT_MISS = -50      // missed legit call penalty
 const GAMEOVER_SCORE = -100       // game over threshold
+
+// ─── Character system ─────────────────────────────────────────────────────────
+const SHIELD_RECHARGE_MS = 15_000
+const PHONE_BOOST_MS     = 5_000
+const MAX_SHIELDS        = 2
+
+type CharacterId = 'bento' | 'shield' | 'phone'
+
+interface CharacterDef {
+  id: CharacterId; icon: string; name: string
+  title: string; desc: string; bg: string; accent: string
+}
+
+const CHARACTERS: CharacterDef[] = [
+  {
+    id: 'bento', icon: '🍜', name: '阿宅', title: '便當達人',
+    desc: '每連接 3 個便當進入連擊模式，分數翻倍！踩陷阱會中斷連擊。',
+    bg: 'linear-gradient(135deg,#1a4a1a,#2d6b2d)', accent: '#4ade80',
+  },
+  {
+    id: 'shield', icon: '🛡️', name: '阿雄', title: '鐵胃職員',
+    desc: '每 15 秒充能 1 個護盾（最多 2 個），護盾可完全抵擋 1 次陷阱！',
+    bg: 'linear-gradient(135deg,#1a2a4a,#2a5298)', accent: '#60a5fa',
+  },
+  {
+    id: 'phone', icon: '📱', name: '阿菁', title: '電話達人',
+    desc: '正確接/掛電話後進入 5 秒靈敏模式：便當 +15、陷阱 −8、電話額外 +10！',
+    bg: 'linear-gradient(135deg,#4a1a2a,#8b2252)', accent: '#f472b6',
+  },
+]
 
 const LEGIT_CALLERS = [
   { name: '老闆', sub: '週報發了嗎？' },
@@ -72,10 +105,17 @@ interface GameState {
   nextCallTime: number
   idCounter: number
   lastFrameTs: number
-  elapsed: number           // total ms since game start
-  timeLeft: number          // countdown ms remaining
-  timeUp: boolean           // true if game ended by timer
-  callsDirty: boolean       // signal React to re-render overlays
+  elapsed: number
+  timeLeft: number
+  timeUp: boolean
+  callsDirty: boolean
+  // Character
+  character:       CharacterId
+  comboCount:      number   // bento: consecutive bentos collected
+  comboActive:     boolean  // bento: double-score mode (comboCount >= 3)
+  shields:         number   // shield: current shield count
+  nextShieldTime:  number   // shield: timestamp for next recharge
+  phoneBoostUntil: number   // phone: boost active until this timestamp
 }
 
 // ─── Helper: random int in [min, max] ────────────────────────────────────────
@@ -252,9 +292,20 @@ function drawBackground(ctx: CanvasRenderingContext2D, elapsed: number) {
   ctx.fillStyle = grad
   ctx.fillRect(0, 0, CW, CH)
 
-  // Scrolling city silhouette (simple rectangles)
+  // Scrolling city silhouette (portrait vs landscape building sets)
   ctx.fillStyle = '#0f3460'
-  const buildingData = [
+  const buildingData = CW < 500 ? [
+    // Portrait 390×700
+    [0,   0, 58, 320],
+    [53,  0, 50, 390],
+    [98,  0, 54, 350],
+    [147, 0, 48, 410],
+    [190, 0, 46, 360],
+    [231, 0, 54, 380],
+    [280, 0, 52, 340],
+    [327, 0, 63, 370],
+  ] : [
+    // Landscape 720×480
     [0,   0, 62, 220],
     [57,  0, 48, 280],
     [100, 0, 55, 250],
@@ -303,31 +354,58 @@ function drawBackground(ctx: CanvasRenderingContext2D, elapsed: number) {
   ctx.setLineDash([])
 }
 
-function drawHUD(
-  ctx: CanvasRenderingContext2D,
-  score: number,
-  hiScore: number,
-  timeLeft: number,
-) {
+function drawHUD(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   // Top bar backdrop
   ctx.fillStyle = 'rgba(0,0,0,0.55)'
-  ctx.fillRect(0, 0, CW, 48)
+  ctx.fillRect(0, 0, CW, 60)
 
   ctx.fillStyle = '#fff'
   ctx.font = 'bold 20px sans-serif'
   ctx.textAlign = 'left'
-  ctx.fillText(`分數：${score}`, 14, 30)
+  ctx.fillText(`分數：${gs.score}`, 14, 30)
 
   ctx.textAlign = 'right'
   ctx.fillStyle = '#f0c040'
-  ctx.fillText(`最高：${hiScore}`, CW - 14, 30)
+  ctx.fillText(`最高：${gs.hiScore}`, CW - 14, 30)
 
-  // Countdown timer
-  const sec = Math.ceil(timeLeft / 1000)
+  const sec = Math.ceil(gs.timeLeft / 1000)
   ctx.textAlign = 'center'
-  ctx.fillStyle = timeLeft < 10000 ? '#f87171' : '#aad4ff'
+  ctx.fillStyle = gs.timeLeft < 10000 ? '#f87171' : '#aad4ff'
   ctx.font = 'bold 16px sans-serif'
   ctx.fillText(`⏱ ${sec}s`, CW / 2, 30)
+
+  // ── Skill indicator row ────────────────────────────────────────────────────
+  ctx.font = '13px sans-serif'
+  ctx.textAlign = 'left'
+
+  if (gs.character === 'bento') {
+    const filled = gs.comboActive ? 3 : gs.comboCount % 3
+    const dots = Array.from({ length: 3 }, (_, i) => i < filled ? '●' : '○').join(' ')
+    ctx.fillStyle = gs.comboActive ? '#f0c040' : '#aaa'
+    ctx.fillText(`${dots}  ${gs.comboActive ? '✦ ×2 連擊中！' : '連擊進度'}`, 14, 52)
+  }
+
+  if (gs.character === 'shield') {
+    const cooldown = Math.max(0, gs.nextShieldTime - now)
+    ctx.fillStyle = '#60a5fa'
+    const shieldIcons = '🛡️'.repeat(gs.shields)
+    const coolStr = gs.shields < MAX_SHIELDS ? `  充能 ${(cooldown / 1000).toFixed(1)}s` : ''
+    ctx.fillText(`${shieldIcons || '─'}${coolStr}`, 14, 52)
+  }
+
+  if (gs.character === 'phone') {
+    const boostLeft = Math.max(0, gs.phoneBoostUntil - now)
+    if (boostLeft > 0) {
+      ctx.fillStyle = 'rgba(244,114,182,0.45)'
+      ctx.fillRect(0, 56, CW * (boostLeft / PHONE_BOOST_MS), 4)
+      ctx.fillStyle = '#f472b6'
+      ctx.textAlign = 'center'
+      ctx.fillText(`⚡ 靈敏模式 ${(boostLeft / 1000).toFixed(1)}s`, CW / 2, 52)
+    } else {
+      ctx.fillStyle = '#888'
+      ctx.fillText('正確接/掛電話 → 靈敏模式', 14, 52)
+    }
+  }
 }
 
 function drawFreezeOverlay(
@@ -423,7 +501,7 @@ function drawGameOver(
 }
 
 // ─── Initial state factory ────────────────────────────────────────────────────
-function initState(hiScore = 0): GameState {
+function initState(hiScore = 0, character: CharacterId = 'bento'): GameState {
   return {
     status: 'idle',
     score: 0,
@@ -443,6 +521,12 @@ function initState(hiScore = 0): GameState {
     timeLeft: GAME_DURATION_MS,
     timeUp: false,
     callsDirty: false,
+    character,
+    comboCount:      0,
+    comboActive:     false,
+    shields:         character === 'shield' ? 1 : 0,
+    nextShieldTime:  0,
+    phoneBoostUntil: 0,
   }
 }
 
@@ -451,27 +535,31 @@ export default function GameCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const gsRef = useRef<GameState>(initState())
   const rafRef = useRef(0)
-  const moveDirRef = useRef<-1 | 0 | 1>(0)
+  const moveDirRef   = useRef<-1 | 0 | 1>(0)
+  const btnActiveRef = useRef(false)   // true only while a d-pad button is physically held
 
-  // React state — only for HTML overlays (phone calls) & status display
+  // React state — only for HTML overlays (phone calls), status & orientation
   const [calls, setCalls] = useState<PhoneCall[]>([])
-  const [gameStatus, setGameStatus] = useState<'idle' | 'playing' | 'gameover'>('idle')
+  const [gameStatus, setGameStatus] = useState<'idle' | 'select' | 'playing' | 'gameover'>('idle')
+  const [portrait, setPortrait] = useState<boolean>(isPortraitViewport)
 
   // ── Start / restart game ───────────────────────────────────────────────────
-  const startGame = useCallback(() => {
-    const gs = gsRef.current
-    const hi = Math.max(gs.hiScore, gs.score)
-    gsRef.current = initState(hi)
+  const startGame = useCallback((char: CharacterId) => {
+    const hi = Math.max(gsRef.current.hiScore, gsRef.current.score)
+    const now = performance.now()
+    gsRef.current = initState(hi, char)
     gsRef.current.status = 'playing'
-    gsRef.current.nextItemTime = performance.now() + 500
-    gsRef.current.nextCallTime = performance.now() + CALL_SPAWN_MS
-    gsRef.current.lastFrameTs = performance.now()
+    gsRef.current.nextItemTime = now + 500
+    gsRef.current.nextCallTime = now + CALL_SPAWN_MS
+    gsRef.current.lastFrameTs = now
+    if (char === 'shield') gsRef.current.nextShieldTime = now + SHIELD_RECHARGE_MS
     setGameStatus('playing')
     setCalls([])
   }, [])
 
   // ── Phone call action handlers ────────────────────────────────────────────
   const handleAnswer = useCallback((callId: number) => {
+    moveDirRef.current = 0
     const gs = gsRef.current
     const call = gs.calls.find(c => c.id === callId)
     if (!call || call.resolved) return
@@ -479,10 +567,12 @@ export default function GameCanvas() {
     gs.callsDirty = true
 
     if (call.type === 'legit') {
-      // Correct! Bonus score, no freeze
       gs.score += SCORE_LEGIT_ANSWER
+      if (gs.character === 'phone') {
+        gs.score += 10
+        gs.phoneBoostUntil = performance.now() + PHONE_BOOST_MS
+      }
     } else {
-      // Scam — accidentally answered: freeze 3s
       gs.frozen = true
       gs.frozenUntil = performance.now() + FREEZE_MS
       gs.frozenMsg = '你接了詐騙電話！😱 小心陌生來電！'
@@ -490,6 +580,7 @@ export default function GameCanvas() {
   }, [])
 
   const handleDecline = useCallback((callId: number) => {
+    moveDirRef.current = 0
     const gs = gsRef.current
     const call = gs.calls.find(c => c.id === callId)
     if (!call || call.resolved) return
@@ -497,9 +588,8 @@ export default function GameCanvas() {
     gs.callsDirty = true
 
     if (call.type === 'scam') {
-      // Correct! No penalty
+      if (gs.character === 'phone') gs.phoneBoostUntil = performance.now() + PHONE_BOOST_MS
     } else {
-      // Legit call — hung up on boss: penalty + freeze 3s
       gs.score += SCORE_LEGIT_MISS
       gs.frozen = true
       gs.frozenUntil = performance.now() + FREEZE_MS
@@ -578,12 +668,36 @@ export default function GameCanvas() {
         item.y < playerTop + PLAYER_H &&
         itemBottom > playerTop
       ) {
-        gs.score += item.type === 'bento' ? SCORE_BENTO : SCORE_TRAP
+        const boosted = gs.character === 'phone' && now < gs.phoneBoostUntil
+        if (item.type === 'bento') {
+          const pts = gs.character === 'bento' && gs.comboActive
+            ? SCORE_BENTO * 2
+            : boosted ? 15 : SCORE_BENTO
+          gs.score += pts
+          if (gs.character === 'bento') {
+            gs.comboCount++
+            if (gs.comboCount >= 3) gs.comboActive = true
+          }
+        } else {
+          if (gs.character === 'shield' && gs.shields > 0) {
+            gs.shields--
+          } else {
+            gs.score += boosted ? -8 : SCORE_TRAP
+            if (gs.character === 'bento') { gs.comboCount = 0; gs.comboActive = false }
+          }
+        }
         if (gs.score > gs.hiScore) gs.hiScore = gs.score
-        return false // consumed
+        return false
       }
       return true
     })
+
+    // Shield recharge
+    if (gs.character === 'shield' && gs.shields < MAX_SHIELDS &&
+        gs.nextShieldTime > 0 && now >= gs.nextShieldTime) {
+      gs.shields++
+      gs.nextShieldTime = gs.shields < MAX_SHIELDS ? now + SHIELD_RECHARGE_MS : Infinity
+    }
 
     // Spawn phone calls
     if (now >= gs.nextCallTime) {
@@ -647,7 +761,7 @@ export default function GameCanvas() {
     drawPlayer(ctx, gs.playerX, playerY, gs.frozen)
 
     // HUD
-    drawHUD(ctx, gs.score, gs.hiScore, gs.timeLeft)
+    drawHUD(ctx, gs, now)
 
     // Freeze overlay
     if (gs.frozen) {
@@ -684,7 +798,9 @@ export default function GameCanvas() {
       }
       if (gs.status !== statusSent) {
         statusSent = gs.status
-        setGameStatus(gs.status)
+        // gameover shows the canvas gameover screen; React state stays 'playing'
+        // until the player taps (handled by onCanvasPointerDown → 'select')
+        if (gs.status !== 'gameover') setGameStatus(gs.status)
         if (gs.status === 'gameover') setCalls([])
       }
 
@@ -694,6 +810,41 @@ export default function GameCanvas() {
     rafRef.current = requestAnimationFrame(loop)
     return () => cancelAnimationFrame(rafRef.current)
   }, [update, render])
+
+  // ── Orientation / resize ──────────────────────────────────────────────────
+  useEffect(() => {
+    const onResize = () => {
+      const p = isPortraitViewport()
+      CW = p ? 390 : 720
+      CH = p ? 700 : 480
+      if (canvasRef.current) {
+        canvasRef.current.width  = CW
+        canvasRef.current.height = CH
+      }
+      const gs = gsRef.current
+      gs.playerX = Math.max(0, Math.min(CW - PLAYER_W, gs.playerX))
+      gs.targetX = gs.playerX
+      setPortrait(p)
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  // ── Global pointer-up: reset ONLY when a d-pad button was held ───────────
+  useEffect(() => {
+    const reset = () => {
+      if (btnActiveRef.current) {
+        btnActiveRef.current = false
+        moveDirRef.current = 0
+      }
+    }
+    document.addEventListener('pointerup',     reset)
+    document.addEventListener('pointercancel', reset)
+    return () => {
+      document.removeEventListener('pointerup',     reset)
+      document.removeEventListener('pointercancel', reset)
+    }
+  }, [])
 
   // ── Keyboard controls ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -712,37 +863,14 @@ export default function GameCanvas() {
     }
   }, [])
 
-  // ── Input: get canvas-space X from client event ───────────────────────────
-  const clientToCanvasX = useCallback((clientX: number) => {
-    const canvas = canvasRef.current!
-    const rect = canvas.getBoundingClientRect()
-    const scaleX = CW / rect.width
-    return (clientX - rect.left) * scaleX - PLAYER_W / 2
-  }, [])
-
-  // ── Mouse handlers ────────────────────────────────────────────────────────
-  const onMouseMove = useCallback((e: React.MouseEvent) => {
-    if (gsRef.current.status !== 'playing') return
-    gsRef.current.targetX = clientToCanvasX(e.clientX)
-  }, [clientToCanvasX])
-
-  const onMouseDown = useCallback((e: React.MouseEvent) => {
-    const gs = gsRef.current
-    if (gs.status === 'idle' || gs.status === 'gameover') {
-      startGame()
-      return
-    }
-    gs.targetX = clientToCanvasX(e.clientX)
-  }, [clientToCanvasX, startGame])
-
-  // ── Touch handlers ────────────────────────────────────────────────────────
-  const onTouchStart = useCallback((e: React.TouchEvent) => {
+  // ── Canvas click / tap → go to character select ──────────────────────────
+  const onCanvasPointerDown = useCallback((e: React.PointerEvent) => {
     const gs = gsRef.current
     if (gs.status === 'idle' || gs.status === 'gameover') {
       e.preventDefault()
-      startGame()
+      setGameStatus('select')
     }
-  }, [startGame])
+  }, [])
 
   // ── Call countdown helper ─────────────────────────────────────────────────
   const CallOverlay = ({ call }: { call: PhoneCall }) => {
@@ -760,13 +888,18 @@ export default function GameCanvas() {
     const isLegit = call.type === 'legit'
     const pct = timeLeft / CALL_TIMEOUT_MS
 
+    const cardW  = portrait ? 180 : 168
+    const fBase  = portrait ? 14  : 11
+    const fTitle = portrait ? 17  : 15
+    const fSub   = portrait ? 14  : 12
+
     return (
       <div
         style={{
           position: 'absolute',
-          top: '28%',
+          top: '10%',
           ...(isLeft ? { left: 0 } : { right: 0 }),
-          width: 168,
+          width: cardW,
           background: isLegit
             ? 'linear-gradient(135deg,#1e3a5f,#2a5298)'
             : 'linear-gradient(135deg,#5f1e1e,#982a2a)',
@@ -784,13 +917,13 @@ export default function GameCanvas() {
         }}
       >
         {/* Caller info */}
-        <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 2 }}>
+        <div style={{ fontSize: fBase, opacity: 0.7, marginBottom: 2 }}>
           {isLegit ? '📞 來電' : '⚠️ 疑似詐騙'}
         </div>
-        <div style={{ fontSize: 15, fontWeight: 700, lineHeight: 1.3 }}>
+        <div style={{ fontSize: fTitle, fontWeight: 700, lineHeight: 1.3 }}>
           {call.caller}
         </div>
-        <div style={{ fontSize: 12, opacity: 0.85, marginTop: 2 }}>
+        <div style={{ fontSize: fSub, opacity: 0.85, marginTop: 2 }}>
           {call.sub}
         </div>
 
@@ -813,7 +946,7 @@ export default function GameCanvas() {
             }}
           />
         </div>
-        <div style={{ fontSize: 11, textAlign: 'right', marginTop: 2, opacity: 0.7 }}>
+        <div style={{ fontSize: fBase, textAlign: 'right', marginTop: 2, opacity: 0.7 }}>
           {(timeLeft / 1000).toFixed(1)}s
         </div>
 
@@ -823,13 +956,13 @@ export default function GameCanvas() {
             onPointerDown={e => { e.stopPropagation(); handleAnswer(call.id) }}
             style={{
               flex: 1,
-              padding: '7px 4px',
+              padding: portrait ? '9px 4px' : '7px 4px',
               background: '#22c55e',
               color: '#fff',
               border: 'none',
               borderRadius: 8,
               fontWeight: 700,
-              fontSize: 13,
+              fontSize: portrait ? 15 : 13,
               cursor: 'pointer',
               touchAction: 'manipulation',
             }}
@@ -846,7 +979,7 @@ export default function GameCanvas() {
               border: 'none',
               borderRadius: 8,
               fontWeight: 700,
-              fontSize: 13,
+              fontSize: portrait ? 15 : 13,
               cursor: 'pointer',
               touchAction: 'manipulation',
             }}
@@ -859,7 +992,7 @@ export default function GameCanvas() {
         <div
           style={{
             marginTop: 6,
-            fontSize: 11,
+            fontSize: fBase,
             textAlign: 'center',
             color: isLegit ? '#93c5fd' : '#fca5a5',
             fontWeight: 600,
@@ -872,15 +1005,17 @@ export default function GameCanvas() {
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
-  const containerW = Math.min(CW, typeof window !== 'undefined' ? window.innerWidth : CW)
-  const scale = containerW / CW
+  const effectiveCW = portrait ? 390 : 720
+  const effectiveCH = portrait ? 700 : 480
+  const containerW = Math.min(effectiveCW, typeof window !== 'undefined' ? window.innerWidth : effectiveCW)
+  const scale = containerW / effectiveCW
 
   return (
     <div
       style={{
         position: 'relative',
-        width: CW * scale,
-        height: CH * scale,
+        width: containerW,
+        height: effectiveCH * scale,
         overflow: 'hidden',
         borderRadius: 12,
         boxShadow: '0 8px 48px rgba(0,0,0,0.6)',
@@ -895,18 +1030,16 @@ export default function GameCanvas() {
 
       <canvas
         ref={canvasRef}
-        width={CW}
-        height={CH}
+        width={effectiveCW}
+        height={effectiveCH}
         style={{
           display: 'block',
           width: '100%',
           height: '100%',
-          touchAction: 'none',
-          cursor: gameStatus === 'playing' ? 'none' : 'pointer',
+            touchAction: 'none',
+          cursor: 'default',
         }}
-        onMouseMove={onMouseMove}
-        onMouseDown={onMouseDown}
-        onTouchStart={onTouchStart}
+        onPointerDown={onCanvasPointerDown}
       />
 
       {/* Phone call overlays */}
@@ -914,6 +1047,60 @@ export default function GameCanvas() {
         calls.map(call => (
           <CallOverlay key={call.id} call={call} />
         ))}
+
+      {/* Character selection overlay */}
+      {gameStatus === 'select' && (
+        <div style={{
+          position: 'absolute', inset: 0,
+          background: 'rgba(8,16,36,0.97)',
+          display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center',
+          zIndex: 50, padding: Math.round(14 * scale), gap: Math.round(10 * scale),
+          overflowY: 'auto',
+        }}>
+          <div style={{
+            color: '#f0c040', fontFamily: 'sans-serif',
+            fontSize: Math.round(22 * scale), fontWeight: 700, marginBottom: 4,
+          }}>
+            🍱 選擇角色
+          </div>
+          <div style={{
+            display: 'flex',
+            flexDirection: portrait ? 'column' : 'row',
+            gap: Math.round(10 * scale), width: '100%',
+          }}>
+            {CHARACTERS.map(char => (
+              <div
+                key={char.id}
+                onPointerDown={() => startGame(char.id)}
+                style={{
+                  flex: 1, background: char.bg,
+                  border: `2px solid ${char.accent}`,
+                  borderRadius: Math.round(14 * scale),
+                  padding: `${Math.round(12 * scale)}px ${Math.round(14 * scale)}px`,
+                  cursor: 'pointer', color: '#fff',
+                  fontFamily: 'sans-serif', touchAction: 'manipulation',
+                  boxShadow: `0 4px 20px ${char.accent}55`,
+                  userSelect: 'none',
+                }}
+              >
+                <div style={{ fontSize: Math.round(28 * scale), marginBottom: Math.round(4 * scale) }}>
+                  {char.icon}
+                </div>
+                <div style={{ fontSize: Math.round(17 * scale), fontWeight: 700 }}>
+                  {char.name}
+                </div>
+                <div style={{ fontSize: Math.round(12 * scale), color: char.accent, marginBottom: Math.round(6 * scale) }}>
+                  「{char.title}」
+                </div>
+                <div style={{ fontSize: Math.round(12 * scale), opacity: 0.9, lineHeight: 1.55 }}>
+                  {char.desc}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* D-pad buttons */}
       {gameStatus === 'playing' && (
@@ -928,10 +1115,10 @@ export default function GameCanvas() {
           {(['←', '→'] as const).map((label, i) => (
             <button
               key={label}
-              onPointerDown={e => { e.stopPropagation(); moveDirRef.current = i === 0 ? -1 : 1 }}
-              onPointerUp={e => { e.stopPropagation(); moveDirRef.current = 0 }}
-              onPointerLeave={e => { e.stopPropagation(); moveDirRef.current = 0 }}
-              onPointerCancel={e => { e.stopPropagation(); moveDirRef.current = 0 }}
+              onPointerDown={e => { e.stopPropagation(); btnActiveRef.current = true; moveDirRef.current = i === 0 ? -1 : 1 }}
+              onPointerUp={e => { e.stopPropagation(); btnActiveRef.current = false; moveDirRef.current = 0 }}
+              onPointerLeave={e => { e.stopPropagation(); btnActiveRef.current = false; moveDirRef.current = 0 }}
+              onPointerCancel={e => { e.stopPropagation(); btnActiveRef.current = false; moveDirRef.current = 0 }}
               style={{
                 width: Math.max(52, Math.round(72 * scale)),
                 height: Math.max(52, Math.round(72 * scale)),
