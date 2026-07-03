@@ -593,7 +593,11 @@ function initState(hiScore = 0, character: CharacterId = "bento"): GameState {
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
-export default function GameCanvas() {
+interface GameCanvasProps {
+  onBack: () => void;
+}
+
+export default function GameCanvas({ onBack }: GameCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const gsRef = useRef<GameState>(initState(getBestForLevel(1)));
   const rafRef = useRef(0);
@@ -1218,6 +1222,33 @@ export default function GameCanvas() {
             }}
             onPointerDown={onCanvasPointerDown}
           />
+
+          {/* Back button — hidden mid-play so it doesn't overlap the HUD */}
+          {gameStatus !== "playing" && (
+            <button
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onBack();
+              }}
+              style={{
+                position: "absolute",
+                top: 10,
+                left: 10,
+                zIndex: 60,
+                padding: "6px 12px",
+                background: "rgba(0,0,0,0.5)",
+                color: "#fff",
+                border: "1px solid rgba(255,255,255,0.35)",
+                borderRadius: 8,
+                fontSize: 13,
+                cursor: "pointer",
+                fontFamily: "sans-serif",
+                touchAction: "manipulation",
+              }}
+            >
+              ← 返回
+            </button>
+          )}
 
           {/* Phone call overlays */}
           {gameStatus === "playing" &&
