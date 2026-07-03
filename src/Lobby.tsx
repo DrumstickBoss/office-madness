@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import homeBg from './assets/home_bg.png'
 import stage1 from './assets/stage_1.png'
 import stage2 from './assets/stage_2.png'
@@ -7,6 +7,7 @@ import stage4 from './assets/stage_4.png'
 import { LEVELS, LevelDef } from './gameData'
 import { loadHistory, getBestForLevel, PlayRecord } from './leaderboard'
 import { loadProfile, saveProfile, getLevelInfo } from './player'
+import { startLobbyBgm, stopLobbyBgm, loadBgmMuted, saveBgmMuted } from './bgm'
 
 const STAGE_IMAGES: Record<number, string> = { 1: stage1, 2: stage2, 3: stage3, 4: stage4 }
 
@@ -28,9 +29,31 @@ export default function Lobby({ onPlay }: LobbyProps) {
   const [editingName, setEditingName] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   const [, forceUpdate] = useState(0)
+  const [bgmMuted, setBgmMuted] = useState(() => loadBgmMuted())
+  const bgmMutedRef = useRef(bgmMuted)
+  useEffect(() => { bgmMutedRef.current = bgmMuted }, [bgmMuted])
 
   // Re-read play history on mount (might have changed after a game)
   useEffect(() => { setHistory(loadHistory()) }, [])
+
+  // Looping chiptune BGM — only while the lobby is on screen. Browsers block audio
+  // until a user gesture, so try immediately and again on the first tap/click.
+  useEffect(() => {
+    const tryStart = () => { if (!bgmMutedRef.current) startLobbyBgm() }
+    tryStart()
+    window.addEventListener('pointerdown', tryStart, { once: true })
+    return () => {
+      window.removeEventListener('pointerdown', tryStart)
+      stopLobbyBgm()
+    }
+  }, [])
+
+  const toggleBgmMuted = () => {
+    const next = !bgmMuted
+    setBgmMuted(next)
+    saveBgmMuted(next)
+    if (next) stopLobbyBgm(); else startLobbyBgm()
+  }
 
   const levelInfo = getLevelInfo(history)
 
@@ -193,15 +216,28 @@ export default function Lobby({ onPlay }: LobbyProps) {
           </div>
         </div>
 
-        <button
-          onPointerDown={() => { setHistory(loadHistory()); setShowLeaderboard(true) }}
-          style={{
-            color: '#f0c040', fontSize: Math.round(13 * scale), fontWeight: 700,
-            background: 'rgba(0,0,0,0.5)', padding: `${Math.round(5 * scale)}px ${Math.round(12 * scale)}px`,
-            borderRadius: 20, border: '1px solid rgba(240,192,64,0.4)',
-            cursor: 'pointer', fontFamily: 'sans-serif', touchAction: 'manipulation',
-          }}
-        >🏆 排行榜</button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: Math.round(6 * scale) }}>
+          <button
+            onPointerDown={toggleBgmMuted}
+            aria-label={bgmMuted ? '開啟音樂' : '關閉音樂'}
+            style={{
+              color: '#f0c040', fontSize: Math.round(14 * scale),
+              background: 'rgba(0,0,0,0.5)', width: Math.round(30 * scale), height: Math.round(30 * scale),
+              borderRadius: '50%', border: '1px solid rgba(240,192,64,0.4)',
+              cursor: 'pointer', touchAction: 'manipulation',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
+          >{bgmMuted ? '🔇' : '🔊'}</button>
+          <button
+            onPointerDown={() => { setHistory(loadHistory()); setShowLeaderboard(true) }}
+            style={{
+              color: '#f0c040', fontSize: Math.round(13 * scale), fontWeight: 700,
+              background: 'rgba(0,0,0,0.5)', padding: `${Math.round(5 * scale)}px ${Math.round(12 * scale)}px`,
+              borderRadius: 20, border: '1px solid rgba(240,192,64,0.4)',
+              cursor: 'pointer', fontFamily: 'sans-serif', touchAction: 'manipulation',
+            }}
+          >🏆 排行榜</button>
+        </div>
       </div>
 
       {/* Bottom stack — start button bar + goal banner */}
