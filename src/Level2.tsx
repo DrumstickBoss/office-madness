@@ -32,6 +32,9 @@ const BIN_SWING_AMP = 50
 const BONUS_SPAWN_MIN_MS = 380
 const BONUS_SPAWN_MAX_MS = 640
 const BONUS_BANNER_MS = 2200
+const BONUS_WARNING_MS = 5000 // flash a "here it comes" warning for the last 5s of the throw phase
+const BONUS_INTRO_MS = 1300 // beat of "🚛 垃圾車來襲！" before bonus items start spawning — no more instant cut
+const DECOY_HINT_MS = 6000 // how long the first-ever decoy's "don't throw me" tooltip stays up
 
 // ─── Bin / item catalogue ───────────────────────────────────────────────────
 type BinType = 'general' | 'recycle' | 'food'
@@ -138,6 +141,38 @@ function playPenalty() {
   if (typeof navigator !== 'undefined' && navigator.vibrate) { try { navigator.vibrate([40, 30, 90]) } catch {} }
 }
 
+// Warning siren — two up/down sweeps, played once when the "垃圾車即將來襲" window opens
+function playAlarmSweep() {
+  const ctx = getAudioCtx()
+  if (!ctx) return
+  const t0 = ctx.currentTime
+  for (let i = 0; i < 2; i++) {
+    const osc = ctx.createOscillator()
+    const g = ctx.createGain()
+    osc.type = 'sawtooth'
+    const start = t0 + i * 0.5
+    osc.frequency.setValueAtTime(500, start)
+    osc.frequency.linearRampToValueAtTime(1000, start + 0.22)
+    osc.frequency.linearRampToValueAtTime(500, start + 0.44)
+    g.gain.setValueAtTime(0.001, start)
+    g.gain.linearRampToValueAtTime(0.12, start + 0.05)
+    g.gain.linearRampToValueAtTime(0.001, start + 0.44)
+    osc.connect(g)
+    g.connect(ctx.destination)
+    osc.start(start)
+    osc.stop(start + 0.46)
+  }
+  if (typeof navigator !== 'undefined' && navigator.vibrate) { try { navigator.vibrate([80, 60, 80]) } catch {} }
+}
+
+const playCountdownBeep = () => playTone(900, 0.12, 'square', 0.15)
+
+// Truck horn — honks once right as Bonus Time's intro card appears
+function playTruckHonk() {
+  playTone(220, 0.25, 'square', 0.16)
+  playTone(180, 0.3, 'square', 0.14, 0.15)
+}
+
 // Für Elise opening phrase — looped as the Bonus Time BGM cue
 const FUR_ELISE = [
   659.25, 622.25, 659.25, 622.25, 659.25, 493.88, 587.33, 523.25, 440.0,
@@ -216,7 +251,15 @@ interface GameState {
   truckActive: boolean
   bonusSpawnAt: number
   bonusBannerUntil: number
+  bonusIntroUntil: number
   lastPenaltyMsg: string | null
+  // Onboarding feedback — teach by nudging during play instead of relying on the idle-screen wall of text
+  hasThrownOnce: boolean
+  decoyHintShownEver: boolean
+  decoyHintActive: boolean
+  decoyHintUntil: number
+  warningPlayed: boolean
+  warningBeepSecond: number
 }
 
 function spawnQueueItem(): QueueItem {
@@ -226,6 +269,19 @@ function spawnQueueItem(): QueueItem {
   }
   const t = pick(TRASH_ITEMS)
   return { kind: 'trash', category: t.category, icon: t.icon, label: t.label }
+}
+
+// Advances to the next queue item, arming a one-time "don't throw me" tooltip
+// the first time a decoy ever shows up.
+function nextQueueItem(gs: GameState, now: number) {
+  gs.decoyHintActive = false
+  const item = spawnQueueItem()
+  gs.queueItem = item
+  if (item.kind === 'decoy' && !gs.decoyHintShownEver) {
+    gs.decoyHintShownEver = true
+    gs.decoyHintActive = true
+    gs.decoyHintUntil = now + DECOY_HINT_MS
+  }
 }
 
 function makeBins(): Bin[] {
@@ -250,8 +306,11 @@ function initState(best: number): GameState {
     aiming: false, aimStart: null, aimCurrent: null, sliceTrail: [],
     shakeUntil: 0, flashUntil: 0, flashColor: '#ff3030',
     idCounter: 1, bonusAudioStarted: false,
-    truckX: -160, truckActive: false, bonusSpawnAt: 0, bonusBannerUntil: 0,
+    truckX: -160, truckActive: false, bonusSpawnAt: 0, bonusBannerUntil: 0, bonusIntroUntil: 0,
     lastPenaltyMsg: null,
+    hasThrownOnce: false,
+    decoyHintShownEver: false, decoyHintActive: false, decoyHintUntil: 0,
+    warningPlayed: false, warningBeepSecond: 0,
   }
 }
 
@@ -267,14 +326,27 @@ function update(gs: GameState, now: number, dtMs: number) {
   const dt = dtMs / 1000
   gs.elapsed += dtMs
 
-  // Phase transition → Bonus Time
+  // Warning window — the last few seconds before Bonus Time get louder instead of
+  // cutting over instantly, so the switch doesn't blindside the player.
+  if (gs.phase === 'throw') {
+    const timeToBonus = THROW_PHASE_MS - gs.elapsed
+    if (timeToBonus > 0 && timeToBonus <= BONUS_WARNING_MS) {
+      if (!gs.warningPlayed) { gs.warningPlayed = true; playAlarmSweep() }
+      const sec = Math.ceil(timeToBonus / 1000)
+      if (sec <= 3 && sec !== gs.warningBeepSecond) { gs.warningBeepSecond = sec; playCountdownBeep() }
+    }
+  }
+
+  // Phase transition → Bonus Time (with a brief title-card beat before items start spawning)
   if (gs.phase === 'throw' && gs.elapsed >= THROW_PHASE_MS) {
     gs.phase = 'bonus'
     gs.flying = gs.flying.filter(f => f.bonus)
     gs.aiming = false; gs.aimStart = null; gs.aimCurrent = null
     gs.truckActive = true; gs.truckX = -160
-    gs.bonusSpawnAt = now + 300
+    gs.bonusIntroUntil = now + BONUS_INTRO_MS
+    gs.bonusSpawnAt = gs.bonusIntroUntil + 250
     gs.bonusBannerUntil = now + BONUS_BANNER_MS
+    playTruckHonk()
     if (!gs.bonusAudioStarted) { gs.bonusAudioStarted = true; startFurElise() }
   }
 
@@ -401,6 +473,9 @@ function update(gs: GameState, now: number, dtMs: number) {
       gs.flying.splice(i, 1)
     }
   }
+
+  // Decoy tooltip times out if the player just sits on it without acting
+  if (gs.decoyHintActive && now > gs.decoyHintUntil) gs.decoyHintActive = false
 
   // Popups aging
   gs.popups = gs.popups.filter(p => now - p.born < 900)
@@ -598,6 +673,55 @@ function drawThrower(ctx: CanvasRenderingContext2D, gs: GameState, now: number) 
   }
 }
 
+// Nudges the player to swipe, until they land their first throw — most people skip the idle-screen text
+function drawSwipeHint(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
+  if (gs.hasThrownOnce || gs.aiming) return
+  const cx = CW / 2
+  const bob = Math.abs(Math.sin(now / 320)) * 14
+  ctx.save()
+  ctx.globalAlpha = 0.9
+  ctx.font = 'bold 30px sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillStyle = '#fff'
+  ctx.shadowColor = 'rgba(0,0,0,0.6)'
+  ctx.shadowBlur = 6
+  ctx.fillText('⬆', cx, THROWER_Y() + 55 - bob)
+  ctx.font = 'bold 13px sans-serif'
+  ctx.fillText('向上滑動丟出去！', cx, THROWER_Y() + 74)
+  ctx.restore()
+}
+
+// One-time tooltip the first time a decoy shows up, pointing at the put-down button
+function drawDecoyHint(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
+  if (!gs.decoyHintActive) return
+  const pulse = 1 + Math.sin(now / 160) * 0.05
+  const bx = CW - 51, by = THROWER_Y() - 30 // roughly where the DOM put-down button sits
+  ctx.save()
+  ctx.translate(CW / 2 + 10, THROWER_Y() - 90)
+  ctx.scale(pulse, pulse)
+  ctx.font = 'bold 13px sans-serif'
+  ctx.textAlign = 'center'
+  ctx.fillStyle = '#ffe08a'
+  ctx.shadowColor = 'rgba(0,0,0,0.7)'
+  ctx.shadowBlur = 6
+  ctx.fillText('⚠️ 別丟進桶子！', 0, 0)
+  ctx.fillText('按右邊「放下」鍵', 0, 16)
+  ctx.restore()
+
+  // Arrow pointing from the tooltip toward the button
+  ctx.save()
+  ctx.strokeStyle = '#ffe08a'
+  ctx.lineWidth = 2
+  ctx.setLineDash([4, 4])
+  ctx.beginPath()
+  ctx.moveTo(CW / 2 + 40, THROWER_Y() - 78)
+  ctx.lineTo(bx, by)
+  ctx.stroke()
+  ctx.setLineDash([])
+  ctx.restore()
+}
+
 function drawPopups(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   for (const p of gs.popups) {
     const age = (now - p.born) / 900
@@ -623,6 +747,31 @@ function drawTruck(ctx: CanvasRenderingContext2D, gs: GameState) {
   ctx.restore()
 }
 
+// Brief title-card beat when Bonus Time begins, instead of items just instantly appearing
+function drawBonusIntro(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
+  const remain = gs.bonusIntroUntil - now
+  if (remain <= 0) return
+  const p = 1 - remain / BONUS_INTRO_MS
+  const scale = p < 0.3 ? 0.6 + (p / 0.3) * 0.5 : 1 // pop in, then hold
+  ctx.save()
+  ctx.fillStyle = `rgba(0,0,0,${0.45 * Math.min(1, p * 4)})`
+  ctx.fillRect(0, 0, CW, CH)
+  ctx.translate(CW / 2, CH / 2)
+  ctx.scale(scale, scale)
+  ctx.font = 'bold 30px sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillStyle = '#ffd23f'
+  ctx.shadowColor = '#ff8c00'
+  ctx.shadowBlur = 16
+  ctx.fillText('🚛 垃圾車來襲！', 0, -14)
+  ctx.font = 'bold 15px sans-serif'
+  ctx.fillStyle = '#fff'
+  ctx.shadowBlur = 6
+  ctx.fillText('瘋狂點擊消滅垃圾拿 Bonus！', 0, 20)
+  ctx.restore()
+}
+
 function drawHUD(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   ctx.fillStyle = 'rgba(0,0,0,0.55)'
   drawRoundRect(ctx, 8, 8, CW - 16, 46, 10)
@@ -639,9 +788,27 @@ function drawHUD(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   ctx.fillText(`BEST ${Math.max(gs.best, gs.score)}`, CW / 2, 31)
 
   const timeLeft = Math.max(0, Math.ceil((TOTAL_MS - gs.elapsed) / 1000))
+  const timeToBonus = gs.phase === 'throw' ? THROW_PHASE_MS - gs.elapsed : Infinity
+  const warningActive = gs.phase === 'throw' && timeToBonus > 0 && timeToBonus <= BONUS_WARNING_MS
   ctx.textAlign = 'right'
-  ctx.fillStyle = gs.phase === 'bonus' ? '#ff6060' : '#fff'
+  ctx.fillStyle = gs.phase === 'bonus' ? '#ff6060' : warningActive && Math.floor(now / 260) % 2 === 0 ? '#ff6060' : '#fff'
   ctx.fillText(`⏱ ${timeLeft}s`, CW - 18, 31)
+
+  // Warning banner counts down the last few seconds before Bonus Time so the
+  // switch never feels like it comes out of nowhere
+  if (warningActive) {
+    const pulse = 1 + Math.sin(now / 130) * 0.08
+    ctx.save()
+    ctx.translate(CW / 2, 56)
+    ctx.scale(pulse, pulse)
+    ctx.font = 'bold 13px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.fillStyle = '#ff8080'
+    ctx.shadowColor = '#ff2020'
+    ctx.shadowBlur = 8
+    ctx.fillText(`⚠️ 垃圾車即將來襲！ ${Math.ceil(timeToBonus / 1000)}s`, 0, 0)
+    ctx.restore()
+  }
 
   // Banner only flashes briefly at the start of Bonus Time, tucked right under the HUD bar
   // so it never sits over the play area where flying items are
@@ -681,9 +848,15 @@ function render(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   if (gs.phase === 'throw') drawBins(ctx, gs, now)
   drawTruck(ctx, gs)
   for (const it of gs.flying) drawFlyingItem(ctx, it)
-  if (gs.phase === 'throw') { drawPowerBar(ctx, gs); drawThrower(ctx, gs, now) }
+  if (gs.phase === 'throw') {
+    drawPowerBar(ctx, gs)
+    drawThrower(ctx, gs, now)
+    drawSwipeHint(ctx, gs, now)
+    drawDecoyHint(ctx, gs, now)
+  }
   drawPopups(ctx, gs, now)
   drawHUD(ctx, gs, now)
+  if (gs.phase === 'bonus') drawBonusIntro(ctx, gs, now)
 
   if (now < gs.flashUntil) {
     ctx.fillStyle = gs.flashColor
@@ -812,7 +985,8 @@ export default function Level2({ onBack }: Level2Props) {
       id: gs.idCounter++, kind: q.kind, category: q.category, icon: q.icon, label: q.label,
       x: CW / 2, y: THROWER_Y() - 40, vx, vy, rot: 0, vrot: rng(-4, 4), bonus: false,
     })
-    gs.queueItem = spawnQueueItem()
+    gs.hasThrownOnce = true
+    nextQueueItem(gs, performance.now())
     gs.aimStart = null
     gs.aimCurrent = null
   }, [])
@@ -836,7 +1010,7 @@ export default function Level2({ onBack }: Level2Props) {
       addPopup(gs, CW / 2, THROWER_Y() - 40, `${SCORE_PUTDOWN_WRONG}`, '#f0a020')
       playWrong()
     }
-    gs.queueItem = spawnQueueItem()
+    nextQueueItem(gs, performance.now())
   }, [])
 
   // ── Layout / scale ────────────────────────────────────────────────────────
@@ -902,10 +1076,12 @@ export default function Level2({ onBack }: Level2Props) {
             <div style={{ fontSize: 46 }}>♻️</div>
             <div style={{ fontSize: 26, fontWeight: 800, color: '#60a5fa' }}>垃圾分類王</div>
             <div style={{ fontSize: 13, color: '#cbd5e1', lineHeight: 1.7, maxWidth: 320 }}>
-              🎯 手指在畫面下方「向上滑動」朝目標方向直線丟出垃圾，左側力道條顯示丟擲力道！<br />
-              🚮 垃圾桶會左右移動，過一陣子還會被推開重新排列，甚至像籃球機一樣搖晃！<br />
-              🙅 混進來的「老人家」「女友」別丟進桶子！按旁邊「放下」鍵安全帶開，丟垃圾時按錯放下扣 50 分！<br />
-              🚛 最後 10 秒垃圾車突襲，輕鬆點擊消滅垃圾拿 Bonus！
+              🎯 向上滑動把垃圾丟進正確的桶子！<br />
+              🙅 混進來的「老人家」「女友」別丟進桶子！<br />
+              🚛 最後倒數垃圾車會來襲，點擊消滅垃圾拿 Bonus！
+            </div>
+            <div style={{ fontSize: 11, color: '#7a8bab' }}>
+              （放心，遊戲中會即時提示怎麼玩）
             </div>
             <button
               onPointerDown={startGame}
