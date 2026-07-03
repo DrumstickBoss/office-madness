@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState, useCallback } from "react";
 import { addRecord, getBestForLevel } from "./leaderboard";
+import game1BgSrc from "./assets/game1_bg.png";
 
 // ─── Canvas dimensions (mutable — updated on orientation change) ─────────────
 const isPortraitViewport = () =>
@@ -239,29 +240,10 @@ function drawMeal(
 }
 
 function drawBackground(ctx: CanvasRenderingContext2D) {
-  // Gradient sky → floor
-  const grad = ctx.createLinearGradient(0, 0, 0, CH);
-  grad.addColorStop(0, "#1a1a2e");
-  grad.addColorStop(1, "#16213e");
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, CW, CH);
-
-  // Ground / road
-  ctx.fillStyle = "#0d2137";
-  ctx.fillRect(0, CH - 60, CW, 60);
-  ctx.fillStyle = "#1a3a55";
-  ctx.fillRect(0, CH - 62, CW, 4);
-
-  // Road markings
-  ctx.fillStyle = "#f0c040";
-  ctx.setLineDash([30, 20]);
-  ctx.strokeStyle = "#f0c040";
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(0, CH - 30);
-  ctx.lineTo(CW, CH - 30);
-  ctx.stroke();
-  ctx.setLineDash([]);
+  // The background art is a real DOM <img> behind the canvas now (crisp at native
+  // resolution instead of being rasterized into the small canvas buffer and
+  // stretched blurry) — the canvas itself just needs to stay transparent.
+  ctx.clearRect(0, 0, CW, CH);
 }
 
 function drawHUD(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
@@ -1055,6 +1037,24 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
         overflow: "hidden",
       }}
     >
+      {/* Background art — a real <img> at native resolution, sized to the actual
+          viewport width (not the logical/scaled canvas), so it stays crisp instead
+          of being rasterized into the small canvas buffer and stretched blurry.
+          Same letterbox treatment as the lobby: full width, black bars for the rest. */}
+      <img
+        src={game1BgSrc}
+        alt=""
+        style={{
+          position: "absolute",
+          top: "50%",
+          left: 0,
+          width: "100%",
+          height: "auto",
+          transform: "translateY(-50%)",
+          display: "block",
+        }}
+      />
+
       <style>{`
         @keyframes slideIn {
           from { transform: translateX(var(--slide-x, -100%)); opacity: 0; }

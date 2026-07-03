@@ -4,7 +4,7 @@ import stage1 from './assets/stage_1.png'
 import stage2 from './assets/stage_2.png'
 import stage3 from './assets/stage_3.png'
 import stage4 from './assets/stage_4.png'
-import { LEVELS, LevelDef } from './gameData'
+import { LEVELS, LevelDef, getStars } from './gameData'
 import { loadHistory, getBestForLevel, PlayRecord } from './leaderboard'
 import { loadProfile, saveProfile, getLevelInfo } from './player'
 import { startLobbyBgm, stopLobbyBgm, loadBgmMuted, saveBgmMuted } from './bgm'
@@ -89,12 +89,16 @@ export default function Lobby({ onPlay }: LobbyProps) {
   const canStart = selectedLevel != null && (LEVELS.find(l => l.id === selectedLevel)?.unlocked ?? false)
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden', fontFamily: 'sans-serif' }}>
+    <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden', fontFamily: 'sans-serif', background: '#000' }}>
 
-      {/* Background image */}
+      {/* Background image — always full width, letterboxed in black rather than cropped left/right */}
       <img
         src={homeBg}
-        style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', objectPosition: 'center', display: 'block' }}
+        style={{
+          position: 'absolute', top: '50%', left: 0,
+          width: '100%', height: 'auto',
+          transform: 'translateY(-50%)', display: 'block',
+        }}
         alt=""
       />
 
@@ -128,15 +132,29 @@ export default function Lobby({ onPlay }: LobbyProps) {
             />
             {level.unlocked && (
               <div style={{
-                position: 'absolute', left: '50%', bottom: '6%',
+                position: 'absolute', left: '50%', bottom: '5%',
                 transform: 'translateX(-50%)',
-                background: 'rgba(0,0,0,0.72)', color: '#f0c040',
-                fontSize: Math.max(9, Math.round(btnW * 0.075)), fontWeight: 700,
-                padding: '2px 8px', borderRadius: 20,
-                border: '1px solid rgba(240,192,64,0.5)',
-                whiteSpace: 'nowrap', pointerEvents: 'none',
+                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1,
+                pointerEvents: 'none',
               }}>
-                {best > 0 ? `🏆 ${best}` : '尚未挑戰'}
+                <div style={{
+                  background: 'rgba(0,0,0,0.72)', color: '#f0c040',
+                  fontSize: Math.max(9, Math.round(btnW * 0.075)), fontWeight: 700,
+                  padding: '2px 8px', borderRadius: 20,
+                  border: '1px solid rgba(240,192,64,0.5)',
+                  whiteSpace: 'nowrap',
+                }}>
+                  {best > 0 ? `🏆 ${best}` : '尚未挑戰'}
+                </div>
+                {best > 0 && (
+                  <div style={{
+                    fontSize: Math.max(9, Math.round(btnW * 0.1)), letterSpacing: 1,
+                    textShadow: '0 1px 3px rgba(0,0,0,0.9)',
+                  }}>
+                    <span style={{ color: '#f0c040' }}>{'★'.repeat(getStars(level.id, best))}</span>
+                    <span style={{ color: 'rgba(255,255,255,0.35)' }}>{'★'.repeat(3 - getStars(level.id, best))}</span>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -240,44 +258,59 @@ export default function Lobby({ onPlay }: LobbyProps) {
         </div>
       </div>
 
-      {/* Bottom stack — start button bar + goal banner */}
-      <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, display: 'flex', flexDirection: 'column' }}>
+      {/* Bottom stack — goal card + start button (with player avatar) */}
+      <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, display: 'flex', flexDirection: 'column', gap: Math.round(8 * scale) }}>
+        {/* Goal card */}
         <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+          display: 'flex', alignItems: 'center', gap: Math.round(10 * scale),
+          margin: `0 ${Math.round(14 * scale)}px`,
+          background: 'rgba(10,20,45,0.82)', border: '1px solid rgba(255,255,255,0.15)',
+          borderRadius: 12, padding: Math.round(8 * scale),
+        }}>
+          <div style={{
+            width: Math.round(34 * scale), height: Math.round(34 * scale), borderRadius: '50%',
+            background: 'radial-gradient(circle,#f0c040,#e0a010)', flexShrink: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: Math.round(17 * scale), boxShadow: '0 2px 6px rgba(0,0,0,0.4)',
+          }}>🏆</div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ color: '#fff', fontWeight: 700, fontSize: Math.round(13 * scale) }}>
+              下一個目標：打敗自己！
+            </div>
+            <div style={{ color: '#9fb3d9', fontSize: Math.round(11 * scale), marginTop: 1 }}>
+              刷新你的最高分，贏得更多榮耀！
+            </div>
+          </div>
+        </div>
+
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: Math.round(8 * scale),
           padding: `${Math.round(10 * scale)}px ${Math.round(14 * scale)}px`,
           background: 'linear-gradient(0deg,rgba(0,0,0,0.75) 0%,rgba(0,0,0,0) 100%)',
         }}>
+          <div style={{
+            width: Math.round(38 * scale), height: Math.round(38 * scale), borderRadius: '50%',
+            background: 'rgba(255,255,255,0.1)', border: `2px solid #000`,
+            boxShadow: '0 0 0 2px rgba(240,192,64,0.6)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: Math.round(19 * scale), flexShrink: 0,
+          }}>{profile.avatar}</div>
           <button
             onPointerDown={() => { if (canStart && selectedLevel != null) onPlay(selectedLevel) }}
             style={{
               padding: `${Math.round(11 * scale)}px ${Math.round(24 * scale)}px`,
               background: canStart ? 'linear-gradient(135deg,#f0a020,#e06010)' : 'rgba(60,60,60,0.7)',
               color: canStart ? '#fff' : '#666',
-              border: canStart ? '2px solid #f0c040' : '2px solid #444',
+              border: canStart ? '3px solid #000' : '2px solid #444',
+              boxShadow: canStart ? '0 0 0 2px #f0c040, 0 4px 20px rgba(240,160,32,0.5)' : 'none',
               borderRadius: Math.round(10 * scale),
               fontWeight: 700, fontSize: Math.round(16 * scale),
               cursor: canStart ? 'pointer' : 'not-allowed',
               fontFamily: 'sans-serif', whiteSpace: 'nowrap',
-              boxShadow: canStart ? '0 4px 20px rgba(240,160,32,0.5)' : 'none',
               touchAction: 'manipulation',
               textShadow: canStart ? '0 1px 4px rgba(0,0,0,0.4)' : 'none',
             }}
           >{canStart ? '開始挑戰 →' : '選擇關卡'}</button>
-        </div>
-
-        {/* Goal banner */}
-        <div style={{
-          textAlign: 'center',
-          padding: `${Math.round(8 * scale)}px ${Math.round(14 * scale)}px`,
-          background: 'rgba(0,0,0,0.75)',
-          borderTop: '1px solid rgba(240,192,64,0.35)',
-        }}>
-          <div style={{ color: '#f0c040', fontWeight: 700, fontSize: Math.round(13 * scale) }}>
-            🎯 下一個目標：打敗自己！
-          </div>
-          <div style={{ color: '#cbd5e1', fontSize: Math.round(11 * scale), marginTop: 2 }}>
-            刷新你的最高分，贏得更多榮耀！
-          </div>
         </div>
       </div>
 
