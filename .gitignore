@@ -18,6 +18,7 @@ next-app/.next
 
 # production
 **/build
+**/dist
 
 # misc
 .DS_Store
