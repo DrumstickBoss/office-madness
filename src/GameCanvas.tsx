@@ -11,19 +11,18 @@ let CH = isPortraitViewport() ? 700 : 480;
 // ─── Game tuning ─────────────────────────────────────────────────────────────
 const PLAYER_W = 54;
 const PLAYER_H = 64;
-const ITEM_SIZE = 42;
-const ITEM_SPAWN_MS = 1500;
+const ITEM_SIZE = 50;
+const ITEM_SPAWN_MS = 1200;
 const CALL_SPAWN_MS = 10_000;
 const CALL_TIMEOUT_MS = 3000; // seconds before call auto-expires
 const FREEZE_MS = 3000; // freeze duration for any mistake
 const GAME_DURATION_MS = 60_000; // 1-minute countdown
-const PLAYER_SPEED = 14; // px per frame at 60fps
+const PLAYER_SPEED = 8; // px per frame at 60fps
 const SCORE_LEGIT_ANSWER = 20; // bonus for correctly answering legit call
 const SCORE_LEGIT_MISS = -50; // missed legit call penalty
 const GAMEOVER_SCORE = -100; // game over threshold
 const SCORE_SPECIAL = 25; // bonus for catching today's special
 const FAT_DURATION_MS = 3000; // wrong-meal fat/slow duration
-const SPICY_FREEZE_MS = 5000; // spicy-hot-pot freeze duration
 
 // ─── Meal catalogue ───────────────────────────────────────────────────────────
 const MEAL_FILES = [
@@ -44,19 +43,6 @@ const SPECIAL_MEAL_FILES = MEAL_FILES.filter(
   (f) => f !== "salad.png" && f !== "spicy-hot-pot.png",
 );
 
-const MEAL_NAMES: Record<string, string> = {
-  "fried-chicken-bucket.png": "炸雞桶",
-  "fried-chicken.png": "炸雞",
-  "hamburger.png": "漢堡",
-  "hot-dog.png": "熱狗",
-  "japanese-bento.png": "日式便當",
-  "pizza.png": "披薩",
-  "ramen.png": "拉麵",
-  "salad.png": "沙拉",
-  "spicy-hot-pot.png": "🌶️麻辣鍋",
-  "takoyaki.png": "章魚燒",
-};
-
 // Module-level image cache — starts loading immediately when the module is imported
 const IMG_CACHE = new Map<string, HTMLImageElement>();
 MEAL_FILES.forEach((file) => {
@@ -71,46 +57,6 @@ const PHONE_BOOST_MS = 5_000;
 const MAX_SHIELDS = 2;
 
 type CharacterId = "bento" | "shield" | "phone";
-
-interface CharacterDef {
-  id: CharacterId;
-  icon: string;
-  name: string;
-  title: string;
-  desc: string;
-  bg: string;
-  accent: string;
-}
-
-const CHARACTERS: CharacterDef[] = [
-  {
-    id: "bento",
-    icon: "🍜",
-    name: "阿宅",
-    title: "便當達人",
-    desc: "每連接 3 個便當進入連擊模式，分數翻倍！踩陷阱會中斷連擊。",
-    bg: "linear-gradient(135deg,#1a4a1a,#2d6b2d)",
-    accent: "#4ade80",
-  },
-  {
-    id: "shield",
-    icon: "🛡️",
-    name: "阿雄",
-    title: "鐵胃職員",
-    desc: "每 15 秒充能 1 個護盾（最多 2 個），護盾可完全抵擋 1 次陷阱！",
-    bg: "linear-gradient(135deg,#1a2a4a,#2a5298)",
-    accent: "#60a5fa",
-  },
-  {
-    id: "phone",
-    icon: "📱",
-    name: "阿菁",
-    title: "電話達人",
-    desc: "正確接/掛電話後進入 5 秒靈敏模式：便當 +15、陷阱 −8、電話額外 +10！",
-    bg: "linear-gradient(135deg,#4a1a2a,#8b2252)",
-    accent: "#f472b6",
-  },
-];
 
 const LEGIT_CALLERS = [
   { name: "老闆", sub: "週報發了嗎？" },
@@ -136,7 +82,6 @@ interface FallingItem {
   y: number;
   mealFile: string;
   speed: number;
-  wobble: number; // phase offset for horizontal sway
 }
 
 interface PhoneCall {
@@ -176,7 +121,7 @@ interface GameState {
   nextShieldTime: number; // shield: timestamp for next recharge
   phoneBoostUntil: number; // phone: boost active until this timestamp
   // Daily special
-  dailySpecial: string; // today's special meal filename
+  dailySpecial: string[]; // today's two special meal filenames
   fat: boolean; // player ate wrong meal — slower
   fatUntil: number; // when fat effect expires
 }
@@ -293,60 +238,13 @@ function drawMeal(
   }
 }
 
-function drawBackground(ctx: CanvasRenderingContext2D, elapsed: number) {
+function drawBackground(ctx: CanvasRenderingContext2D) {
   // Gradient sky → floor
   const grad = ctx.createLinearGradient(0, 0, 0, CH);
   grad.addColorStop(0, "#1a1a2e");
   grad.addColorStop(1, "#16213e");
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, CW, CH);
-
-  // Scrolling city silhouette (portrait vs landscape building sets)
-  ctx.fillStyle = "#0f3460";
-  const buildingData =
-    CW < 500
-      ? [
-          // Portrait 390×700
-          [0, 0, 58, 320],
-          [53, 0, 50, 390],
-          [98, 0, 54, 350],
-          [147, 0, 48, 410],
-          [190, 0, 46, 360],
-          [231, 0, 54, 380],
-          [280, 0, 52, 340],
-          [327, 0, 63, 370],
-        ]
-      : [
-          // Landscape 720×480
-          [0, 0, 62, 220],
-          [57, 0, 48, 280],
-          [100, 0, 55, 250],
-          [150, 0, 50, 300],
-          [195, 0, 44, 230],
-          [234, 0, 65, 260],
-          [294, 0, 50, 315],
-          [339, 0, 58, 245],
-          [392, 0, 52, 270],
-          [439, 0, 46, 235],
-          [480, 0, 62, 295],
-          [537, 0, 50, 260],
-          [582, 0, 56, 225],
-          [633, 0, 48, 280],
-          [676, 0, 48, 250],
-        ];
-  for (const [bx, , bw, bh] of buildingData) {
-    ctx.fillRect(bx, CH - bh, bw, bh);
-    // Windows
-    ctx.fillStyle = elapsed % 2000 < 1000 ? "#e2b96f" : "#c9952a";
-    for (let wy = CH - bh + 10; wy < CH - 20; wy += 20) {
-      for (let wx = bx + 6; wx < bx + bw - 8; wx += 14) {
-        if (Math.random() > 0.3) {
-          ctx.fillRect(wx, wy, 7, 9);
-        }
-      }
-    }
-    ctx.fillStyle = "#0f3460";
-  }
 
   // Ground / road
   ctx.fillStyle = "#0d2137";
@@ -428,7 +326,6 @@ function drawHUD(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   }
 
   // ── Row 3: Daily special ───────────────────────────────────────────────────
-  const specialName = MEAL_NAMES[gs.dailySpecial] ?? gs.dailySpecial;
   ctx.fillStyle = "rgba(240,192,64,0.12)";
   ctx.fillRect(0, 54, CW, 28);
   ctx.strokeStyle = "#f0c040";
@@ -444,17 +341,15 @@ function drawHUD(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   ctx.textAlign = "left";
   ctx.fillText("今日特餐 ✦", 10, 72);
 
-  // Food image (24×24)
-  const img = IMG_CACHE.get(gs.dailySpecial);
-  const imgX = 90;
-  if (img && img.complete && img.naturalWidth > 0) {
-    ctx.drawImage(img, imgX, 56, 24, 24);
+  // Two special food images
+  let ix = 92;
+  for (const sf of gs.dailySpecial) {
+    const img = IMG_CACHE.get(sf);
+    if (img && img.complete && img.naturalWidth > 0) {
+      ctx.drawImage(img, ix, 55, 26, 26);
+    }
+    ix += 32;
   }
-
-  // Meal name
-  ctx.fillStyle = "#fff";
-  ctx.font = "bold 14px sans-serif";
-  ctx.fillText(specialName, imgX + 30, 72);
 
   // +25 hint
   ctx.fillStyle = "#4ade80";
@@ -586,7 +481,9 @@ function initState(hiScore = 0, character: CharacterId = "bento"): GameState {
     shields: character === "shield" ? 1 : 0,
     nextShieldTime: 0,
     phoneBoostUntil: 0,
-    dailySpecial: pick(SPECIAL_MEAL_FILES),
+    dailySpecial: [...SPECIAL_MEAL_FILES]
+      .sort(() => Math.random() - 0.5)
+      .slice(0, 2),
     fat: false,
     fatUntil: 0,
   };
@@ -607,7 +504,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
   // React state — only for HTML overlays (phone calls), status & orientation
   const [calls, setCalls] = useState<PhoneCall[]>([]);
   const [gameStatus, setGameStatus] = useState<
-    "idle" | "select" | "playing" | "gameover"
+    "idle" | "playing" | "gameover"
   >("idle");
   const [portrait, setPortrait] = useState<boolean>(isPortraitViewport);
   const [vpW, setVpW] = useState(() =>
@@ -721,7 +618,6 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
         y: -ITEM_SIZE,
         mealFile: pick(MEAL_FILES),
         speed: 1.8 + Math.random() * 1.2 + gs.elapsed * 0.0001,
-        wobble: Math.random() * Math.PI * 2,
       });
     }
 
@@ -732,8 +628,6 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
 
     gs.items = gs.items.filter((item) => {
       item.y += item.speed;
-      // Gentle horizontal sway
-      item.x += Math.sin(item.wobble + gs.elapsed * 0.003) * 0.4;
 
       // Off-screen
       if (item.y > CH) return false;
@@ -748,7 +642,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
         itemBottom > playerTop
       ) {
         const mf = item.mealFile;
-        if (mf === gs.dailySpecial) {
+        if (gs.dailySpecial.includes(mf)) {
           // Correct special — bonus
           const boosted = gs.character === "phone" && now < gs.phoneBoostUntil;
           gs.score += boosted ? SCORE_SPECIAL + 10 : SCORE_SPECIAL;
@@ -756,23 +650,6 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
             gs.comboCount++;
             if (gs.comboCount >= 3) gs.comboActive = true;
           }
-        } else if (mf === "spicy-hot-pot.png") {
-          // Spicy hot pot — freeze 5s (shield can block)
-          if (gs.character === "shield" && gs.shields > 0) {
-            gs.shields--;
-          } else {
-            gs.frozen = true;
-            gs.frozenUntil = now + SPICY_FREEZE_MS;
-            gs.frozenMsg = "🌶️ 麻辣鍋太辣！凍住 5 秒！";
-            if (gs.character === "bento") {
-              gs.comboCount = 0;
-              gs.comboActive = false;
-            }
-          }
-        } else if (mf === "salad.png" && gs.fat) {
-          // Salad cures fat immediately
-          gs.fat = false;
-          gs.fatUntil = 0;
         } else {
           // Wrong meal — fat & slow 3s (shield can block)
           if (gs.character === "shield" && gs.shields > 0) {
@@ -860,16 +737,11 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
   // ── Render (canvas only) ───────────────────────────────────────────────────
   const render = useCallback(
     (ctx: CanvasRenderingContext2D, gs: GameState, now: number) => {
-      drawBackground(ctx, gs.elapsed);
+      drawBackground(ctx);
 
       // Falling items — all use sprite images
       for (const item of gs.items) {
-        drawMeal(
-          ctx,
-          item.x,
-          item.y,
-          item.mealFile,
-        );
+        drawMeal(ctx, item.x, item.y, item.mealFile);
       }
 
       // Player
@@ -934,7 +806,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
       if (gs.status !== statusSent) {
         statusSent = gs.status;
         // gameover shows the canvas gameover screen; React state stays 'playing'
-        // until the player taps (handled by onCanvasPointerDown → 'select')
+        // until the player taps to restart
         if (gs.status !== "gameover") setGameStatus(gs.status);
         if (gs.status === "gameover") setCalls([]);
       }
@@ -988,6 +860,14 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "ArrowLeft") moveDirRef.current = -1;
       if (e.key === "ArrowRight") moveDirRef.current = 1;
+      if (e.key === "z" || e.key === "Z") {
+        const call = gsRef.current.calls.find((c) => !c.resolved);
+        if (call) handleAnswer(call.id);
+      }
+      if (e.key === "x" || e.key === "X") {
+        const call = gsRef.current.calls.find((c) => !c.resolved);
+        if (call) handleDecline(call.id);
+      }
     };
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.key === "ArrowLeft" || e.key === "ArrowRight")
@@ -1001,14 +881,17 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
     };
   }, []);
 
-  // ── Canvas click / tap → go to character select ──────────────────────────
-  const onCanvasPointerDown = useCallback((e: React.PointerEvent) => {
-    const gs = gsRef.current;
-    if (gs.status === "idle" || gs.status === "gameover") {
-      e.preventDefault();
-      setGameStatus("select");
-    }
-  }, []);
+  // ── Canvas click / tap → start game immediately ──────────────────────────
+  const onCanvasPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      const gs = gsRef.current;
+      if (gs.status === "idle" || gs.status === "gameover") {
+        e.preventDefault();
+        startGame("bento");
+      }
+    },
+    [startGame],
+  );
 
   // ── Call countdown helper ─────────────────────────────────────────────────
   const CallOverlay = ({ call }: { call: PhoneCall }) => {
@@ -1254,85 +1137,6 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
           {gameStatus === "playing" &&
             calls.map((call) => <CallOverlay key={call.id} call={call} />)}
 
-          {/* Character selection overlay */}
-          {gameStatus === "select" && (
-            <div
-              style={{
-                position: "absolute",
-                inset: 0,
-                background: "rgba(8,16,36,0.97)",
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                zIndex: 50,
-                padding: 14,
-                gap: 10,
-                overflowY: "auto",
-              }}
-            >
-              <div
-                style={{
-                  color: "#f0c040",
-                  fontFamily: "sans-serif",
-                  fontSize: 22,
-                  fontWeight: 700,
-                  marginBottom: 4,
-                }}
-              >
-                🍱 選擇角色
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  flexDirection: portrait ? "column" : "row",
-                  gap: 10,
-                  width: "100%",
-                }}
-              >
-                {CHARACTERS.map((char) => (
-                  <div
-                    key={char.id}
-                    onPointerDown={() => startGame(char.id)}
-                    style={{
-                      flex: 1,
-                      background: char.bg,
-                      border: `2px solid ${char.accent}`,
-                      borderRadius: 14,
-                      padding: "12px 14px",
-                      cursor: "pointer",
-                      color: "#fff",
-                      fontFamily: "sans-serif",
-                      touchAction: "manipulation",
-                      boxShadow: `0 4px 20px ${char.accent}55`,
-                      userSelect: "none",
-                    }}
-                  >
-                    <div style={{ fontSize: 28, marginBottom: 4 }}>
-                      {char.icon}
-                    </div>
-                    <div style={{ fontSize: 17, fontWeight: 700 }}>
-                      {char.name}
-                    </div>
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: char.accent,
-                        marginBottom: 6,
-                      }}
-                    >
-                      「{char.title}」
-                    </div>
-                    <div
-                      style={{ fontSize: 12, opacity: 0.9, lineHeight: 1.55 }}
-                    >
-                      {char.desc}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
 
           {/* D-pad buttons */}
           {gameStatus === "playing" && (
