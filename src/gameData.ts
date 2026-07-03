@@ -16,16 +16,3 @@ export const LEVELS: LevelDef[] = [
     unlocked: false, accent: '#f97316', bg: 'linear-gradient(135deg,#4a1a0a,#8b4010)' },
 ]
 
-export const getStars = (score: number): number =>
-  score >= 300 ? 3 : score >= 150 ? 2 : score >= 50 ? 1 : 0
-
-// ─── Persistent hi-score (localStorage) ──────────────────────────────────────
-const LS_KEY = 'bentoBlitz_hiScore'
-
-export const loadHiScore = (): number => {
-  try { return parseInt(localStorage.getItem(LS_KEY) ?? '0') || 0 } catch { return 0 }
-}
-
-export const saveHiScore = (s: number): void => {
-  try { localStorage.setItem(LS_KEY, String(s)) } catch {}
-}

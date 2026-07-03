@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from "react";
+import { addRecord, getBestForLevel } from "./leaderboard";
 
 // ─── Canvas dimensions (mutable — updated on orientation change) ─────────────
 const isPortraitViewport = () =>
@@ -594,7 +595,7 @@ function initState(hiScore = 0, character: CharacterId = "bento"): GameState {
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function GameCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const gsRef = useRef<GameState>(initState());
+  const gsRef = useRef<GameState>(initState(getBestForLevel(1)));
   const rafRef = useRef(0);
   const moveDirRef = useRef<-1 | 0 | 1>(0);
   const btnActiveRef = useRef(false);
@@ -615,7 +616,7 @@ export default function GameCanvas() {
   // ── Preload meal images ────────────────────────────────────────────────────
   // ── Start / restart game ───────────────────────────────────────────────────
   const startGame = useCallback((char: CharacterId) => {
-    const hi = Math.max(gsRef.current.hiScore, gsRef.current.score);
+    const hi = getBestForLevel(1);
     const now = performance.now();
     gsRef.current = initState(hi, char);
     gsRef.current.status = "playing";
@@ -671,6 +672,7 @@ export default function GameCanvas() {
 
   // ── Game update logic (called each frame) ─────────────────────────────────
   const update = useCallback((gs: GameState, now: number, dt: number) => {
+    const wasPlaying = gs.status === "playing";
     gs.elapsed += dt;
 
     // Countdown timer
@@ -842,6 +844,12 @@ export default function GameCanvas() {
     // Game over condition
     if (gs.score <= GAMEOVER_SCORE) {
       gs.status = "gameover";
+    }
+
+    // Record this play exactly once, the frame it transitions into gameover
+    if (wasPlaying && gs.status === "gameover") {
+      addRecord(1, gs.score);
+      if (gs.score > gs.hiScore) gs.hiScore = gs.score;
     }
   }, []);
 

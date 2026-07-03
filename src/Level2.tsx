@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
+import { addRecord, getBestForLevel } from './leaderboard'
 
 // ─── Canvas dimensions (mutable — updated on orientation change) ─────────────
 const isPortraitViewport = () =>
@@ -11,7 +12,7 @@ let CH = isPortraitViewport() ? 700 : 480
 const THROW_PHASE_MS = 45_000
 const BONUS_PHASE_MS = 10_000
 const TOTAL_MS = THROW_PHASE_MS + BONUS_PHASE_MS
-const GRAVITY = 1000 // px/s² — only applied to Bonus Time items now
+const GRAVITY = 420 // px/s² — only applied to Bonus Time items; low enough that they arc up to mid-screen
 const DRAG_K = 4.2 // swipe px → launch velocity px/s (throws travel in a straight line)
 const MAX_LAUNCH_SPEED = 900
 const MIN_DRAG_DIST = 45
@@ -24,10 +25,13 @@ const BIN_W = 92
 const BIN_H = 78
 const BIN_RETARGET_MIN_MS = 2400
 const BIN_RETARGET_MAX_MS = 4400
+const BIN_REORDER_AT_MS = 15_000 // bins slide off-screen once and re-enter in a shuffled order
+const BIN_SWING_AT_MS = 25_000 // bins switch to a continuous basketball-hoop-style sway
+const BIN_TRANSITION_MS = 420
+const BIN_SWING_AMP = 50
 const BONUS_SPAWN_MIN_MS = 380
 const BONUS_SPAWN_MAX_MS = 640
 const BONUS_BANNER_MS = 2200
-const LS_KEY = 'bentoBlitz_hiScore_trash'
 
 // ─── Bin / item catalogue ───────────────────────────────────────────────────
 type BinType = 'general' | 'recycle' | 'food'
@@ -156,13 +160,10 @@ function stopFurElise() {
   if (furEliseTimer) { clearTimeout(furEliseTimer); furEliseTimer = null }
 }
 
-// ─── Persistence ─────────────────────────────────────────────────────────────
-const loadBest = (): number => { try { return parseInt(localStorage.getItem(LS_KEY) ?? '0') || 0 } catch { return 0 } }
-const saveBest = (s: number): void => { try { localStorage.setItem(LS_KEY, String(s)) } catch {} }
-
 // ─── Helpers ──────────────────────────────────────────────────────────────
 const rng = (min: number, max: number) => Math.random() * (max - min) + min
 const pick = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)]
+const shuffle = <T,>(arr: T[]): T[] => [...arr].sort(() => Math.random() - 0.5)
 
 // ─── Types ────────────────────────────────────────────────────────────────
 interface FlyingItem {
@@ -179,7 +180,12 @@ interface FlyingItem {
 
 interface Popup { id: number; x: number; y: number; text: string; color: string; born: number }
 
-interface Bin { type: BinType; x: number; targetX: number; nextRetarget: number; laneCx: number; flashUntil: number; flashGood: boolean }
+interface Bin {
+  type: BinType; x: number; targetX: number; nextRetarget: number; laneCx: number
+  flashUntil: number; flashGood: boolean
+  outFromX: number // captured x when a push-out transition starts
+  swingPhase: number; swingSpeed: number
+}
 
 interface QueueItem { kind: 'trash' | 'decoy'; category?: BinType; icon: string; label: string }
 
@@ -191,6 +197,9 @@ interface GameState {
   lastFrameTs: number
   elapsed: number
   bins: Bin[]
+  binTransition: 'idle' | 'out' | 'in'
+  binTransitionStart: number
+  binReorderTriggered: boolean
   flying: FlyingItem[]
   popups: Popup[]
   queueItem: QueueItem
@@ -226,6 +235,8 @@ function makeBins(): Bin[] {
     type, x: lanes[i], targetX: lanes[i], laneCx: lanes[i],
     nextRetarget: performance.now() + rng(BIN_RETARGET_MIN_MS, BIN_RETARGET_MAX_MS),
     flashUntil: 0, flashGood: true,
+    // Small, shared-speed phase offset — bins stay mostly in sync so they never swing into each other
+    outFromX: lanes[i], swingPhase: i * 0.35, swingSpeed: 2.1,
   }))
 }
 
@@ -233,7 +244,8 @@ function initState(best: number): GameState {
   return {
     status: 'idle', phase: 'throw', score: 0, best,
     lastFrameTs: 0, elapsed: 0,
-    bins: makeBins(), flying: [], popups: [],
+    bins: makeBins(), binTransition: 'idle', binTransitionStart: 0, binReorderTriggered: false,
+    flying: [], popups: [],
     queueItem: spawnQueueItem(),
     aiming: false, aimStart: null, aimCurrent: null, sliceTrail: [],
     shakeUntil: 0, flashUntil: 0, flashColor: '#ff3030',
@@ -270,17 +282,57 @@ function update(gs: GameState, now: number, dtMs: number) {
     gs.status = 'gameover'
     gs.phase = 'throw'
     stopFurElise()
-    if (gs.score > gs.best) { gs.best = gs.score; saveBest(gs.best) }
+    addRecord(2, gs.score)
+    if (gs.score > gs.best) gs.best = gs.score
     return
   }
 
-  // Bins drift within their lane, retargeting periodically
-  for (const bin of gs.bins) {
-    if (now >= bin.nextRetarget) {
-      bin.targetX = bin.laneCx + rng(-30, 30)
-      bin.nextRetarget = now + rng(BIN_RETARGET_MIN_MS, BIN_RETARGET_MAX_MS)
+  // Bin motion escalates over the throw phase: gentle drift → one-shot reorder → basketball-hoop sway
+  if (gs.phase === 'throw') {
+    if (gs.elapsed >= BIN_SWING_AT_MS) {
+      for (const bin of gs.bins) {
+        bin.x = bin.laneCx + Math.sin(now / 1000 * bin.swingSpeed + bin.swingPhase) * BIN_SWING_AMP
+      }
+    } else {
+      if (gs.elapsed >= BIN_REORDER_AT_MS && !gs.binReorderTriggered) {
+        gs.binReorderTriggered = true
+        gs.binTransition = 'out'
+        gs.binTransitionStart = now
+        for (const bin of gs.bins) bin.outFromX = bin.x
+      }
+      if (gs.binTransition === 'out') {
+        const p = Math.min(1, (now - gs.binTransitionStart) / BIN_TRANSITION_MS)
+        const eased = p * p
+        for (const bin of gs.bins) bin.x = bin.outFromX + (CW + 140 - bin.outFromX) * eased
+        if (p >= 1) {
+          const types = shuffle(BIN_TYPES)
+          gs.bins.forEach((bin, i) => { bin.type = types[i]; bin.x = -140 })
+          gs.binTransition = 'in'
+          gs.binTransitionStart = now
+        }
+      } else if (gs.binTransition === 'in') {
+        const p = Math.min(1, (now - gs.binTransitionStart) / BIN_TRANSITION_MS)
+        const eased = 1 - (1 - p) * (1 - p)
+        for (const bin of gs.bins) { bin.x = -140 + (bin.laneCx + 140) * eased; bin.targetX = bin.x }
+        if (p >= 1) {
+          gs.binTransition = 'idle'
+          for (const bin of gs.bins) {
+            bin.x = bin.laneCx; bin.targetX = bin.laneCx
+            bin.nextRetarget = now + rng(BIN_RETARGET_MIN_MS, BIN_RETARGET_MAX_MS)
+          }
+        }
+      } else {
+        // Gentle drift within the lane, retargeting periodically
+        // (kept well under half the lane spacing so neighboring bins never overlap)
+        for (const bin of gs.bins) {
+          if (now >= bin.nextRetarget) {
+            bin.targetX = bin.laneCx + rng(-15, 15)
+            bin.nextRetarget = now + rng(BIN_RETARGET_MIN_MS, BIN_RETARGET_MAX_MS)
+          }
+          bin.x += (bin.targetX - bin.x) * Math.min(1, dt * 2.2)
+        }
+      }
     }
-    bin.x += (bin.targetX - bin.x) * Math.min(1, dt * 2.2)
   }
 
   // Garbage truck intro slide
@@ -401,8 +453,8 @@ const EMOJI_FONT = (size: number) => `${size}px "Segoe UI Emoji","Apple Color Em
 function drawBackground(ctx: CanvasRenderingContext2D, phase: 'throw' | 'bonus') {
   const sky = ctx.createLinearGradient(0, 0, 0, CH)
   if (phase === 'bonus') {
-    sky.addColorStop(0, '#3a2f14')
-    sky.addColorStop(1, '#6b4a12')
+    sky.addColorStop(0, '#5a4420')
+    sky.addColorStop(1, '#9a6d1e')
   } else {
     sky.addColorStop(0, '#4ea8de')
     sky.addColorStop(1, '#bfe4f5')
@@ -460,9 +512,22 @@ function drawFlyingItem(ctx: CanvasRenderingContext2D, it: FlyingItem) {
   ctx.save()
   ctx.translate(it.x, it.y)
   ctx.rotate(it.rot)
+  if (it.bonus) {
+    // Light halo so items pop against Bonus Time's dark background
+    const glow = ctx.createRadialGradient(0, 0, 2, 0, 0, 26)
+    glow.addColorStop(0, 'rgba(255,240,200,0.55)')
+    glow.addColorStop(1, 'rgba(255,240,200,0)')
+    ctx.fillStyle = glow
+    ctx.beginPath()
+    ctx.arc(0, 0, 26, 0, Math.PI * 2)
+    ctx.fill()
+  }
   if (it.kind === 'decoy') {
     ctx.shadowColor = 'rgba(255,60,60,0.55)'
     ctx.shadowBlur = 16
+  } else if (it.bonus) {
+    ctx.shadowColor = 'rgba(0,0,0,0.7)'
+    ctx.shadowBlur = 6
   }
   ctx.font = EMOJI_FONT(it.kind === 'decoy' ? 38 : 32)
   ctx.textAlign = 'center'
@@ -471,34 +536,46 @@ function drawFlyingItem(ctx: CanvasRenderingContext2D, it: FlyingItem) {
   ctx.restore()
 }
 
-function drawAimPreview(ctx: CanvasRenderingContext2D, gs: GameState) {
+// No trajectory preview — just a power bar so the player feels how hard they're pulling
+function drawPowerBar(ctx: CanvasRenderingContext2D, gs: GameState) {
   if (!gs.aiming || !gs.aimStart || !gs.aimCurrent) return
-  // Velocity follows the finger's motion (flick-style): current − start
   const dx = gs.aimCurrent.x - gs.aimStart.x
   const dy = gs.aimCurrent.y - gs.aimStart.y
   const dist = Math.hypot(dx, dy)
-  if (dist < 10) return
-  let vx = dx * DRAG_K, vy = dy * DRAG_K
-  const speed = Math.hypot(vx, vy)
-  if (speed > MAX_LAUNCH_SPEED) { vx *= MAX_LAUNCH_SPEED / speed; vy *= MAX_LAUNCH_SPEED / speed }
+  if (dist < 6) return
+  const validDir = dy < -MIN_DRAG_DIST * 0.5
+  const maxDist = MAX_LAUNCH_SPEED / DRAG_K
+  const ratio = Math.max(0, Math.min(1, dist / maxDist))
+
+  const barW = 16, barH = 150
+  const barX = 22
+  const barBottom = THROWER_Y() + 6
+  const barTop = barBottom - barH
 
   ctx.save()
-  ctx.setLineDash([8, 8])
-  ctx.strokeStyle = dy < -MIN_DRAG_DIST * 0.6 ? 'rgba(255,255,255,0.85)' : 'rgba(255,80,80,0.7)'
-  ctx.lineWidth = 3
-  ctx.beginPath()
-  // Straight-line preview — no gravity, so it's a single ray in the swipe direction
-  let px = CW / 2, py = THROWER_Y() - 40
-  ctx.moveTo(px, py)
-  for (let t = 0; t < 40; t++) {
-    const step = 0.035
-    px += vx * step
-    py += vy * step
-    ctx.lineTo(px, py)
-    if (py < -40 || py > CH) break
-  }
+  ctx.fillStyle = 'rgba(0,0,0,0.4)'
+  drawRoundRect(ctx, barX, barTop, barW, barH, 8)
+  ctx.fill()
+  ctx.strokeStyle = validDir ? 'rgba(255,255,255,0.6)' : 'rgba(255,80,80,0.85)'
+  ctx.lineWidth = 2
+  drawRoundRect(ctx, barX, barTop, barW, barH, 8)
   ctx.stroke()
-  ctx.setLineDash([])
+
+  const fillH = Math.max(0, barH * ratio - 4)
+  if (fillH > 0) {
+    const grad = ctx.createLinearGradient(0, barBottom, 0, barTop)
+    grad.addColorStop(0, '#4ade80')
+    grad.addColorStop(0.6, '#f0c040')
+    grad.addColorStop(1, '#ff4040')
+    ctx.fillStyle = validDir ? grad : 'rgba(255,80,80,0.55)'
+    drawRoundRect(ctx, barX + 2, barBottom - 2 - fillH, barW - 4, fillH, 6)
+    ctx.fill()
+  }
+
+  ctx.font = 'bold 11px sans-serif'
+  ctx.fillStyle = validDir ? '#fff' : '#ffb0b0'
+  ctx.textAlign = 'center'
+  ctx.fillText(validDir ? '力道' : '↑ 需向上', barX + barW / 2, barTop - 10)
   ctx.restore()
 }
 
@@ -537,11 +614,12 @@ function drawPopups(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
 
 function drawTruck(ctx: CanvasRenderingContext2D, gs: GameState) {
   if (!gs.truckActive) return
+  // Kept small and tucked above the play area so it never overlaps flying items
   ctx.save()
-  ctx.font = EMOJI_FONT(56)
+  ctx.font = EMOJI_FONT(34)
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
-  ctx.fillText('🚛', gs.truckX, 60)
+  ctx.fillText('🚛', gs.truckX, 30)
   ctx.restore()
 }
 
@@ -565,19 +643,20 @@ function drawHUD(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   ctx.fillStyle = gs.phase === 'bonus' ? '#ff6060' : '#fff'
   ctx.fillText(`⏱ ${timeLeft}s`, CW - 18, 31)
 
-  // Banner only flashes briefly at the start of Bonus Time so it never sits over the play area
+  // Banner only flashes briefly at the start of Bonus Time, tucked right under the HUD bar
+  // so it never sits over the play area where flying items are
   if (gs.phase === 'bonus' && now < gs.bonusBannerUntil) {
-    const pulse = 1 + Math.sin(now / 120) * 0.08
+    const pulse = 1 + Math.sin(now / 120) * 0.06
     const age = 1 - (gs.bonusBannerUntil - now) / BONUS_BANNER_MS
     ctx.save()
     ctx.globalAlpha = age > 0.7 ? 1 - (age - 0.7) / 0.3 : 1
-    ctx.translate(CW / 2, 64)
+    ctx.translate(CW / 2, 56)
     ctx.scale(pulse, pulse)
-    ctx.font = 'bold 18px sans-serif'
+    ctx.font = 'bold 14px sans-serif'
     ctx.textAlign = 'center'
     ctx.fillStyle = '#ffd23f'
     ctx.shadowColor = '#ff8c00'
-    ctx.shadowBlur = 12
+    ctx.shadowBlur = 8
     ctx.fillText('🚛 垃圾車突襲 BONUS TIME！', 0, 0)
     ctx.restore()
   }
@@ -602,7 +681,7 @@ function render(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   if (gs.phase === 'throw') drawBins(ctx, gs, now)
   drawTruck(ctx, gs)
   for (const it of gs.flying) drawFlyingItem(ctx, it)
-  if (gs.phase === 'throw') { drawAimPreview(ctx, gs); drawThrower(ctx, gs, now) }
+  if (gs.phase === 'throw') { drawPowerBar(ctx, gs); drawThrower(ctx, gs, now) }
   drawPopups(ctx, gs, now)
   drawHUD(ctx, gs, now)
 
@@ -621,7 +700,7 @@ interface Level2Props { onBack: () => void }
 
 export default function Level2({ onBack }: Level2Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const gsRef = useRef<GameState>(initState(loadBest()))
+  const gsRef = useRef<GameState>(initState(getBestForLevel(2)))
   const rafRef = useRef(0)
 
   const [status, setStatus] = useState<'idle' | 'playing' | 'gameover'>('idle')
@@ -823,8 +902,8 @@ export default function Level2({ onBack }: Level2Props) {
             <div style={{ fontSize: 46 }}>♻️</div>
             <div style={{ fontSize: 26, fontWeight: 800, color: '#60a5fa' }}>垃圾分類王</div>
             <div style={{ fontSize: 13, color: '#cbd5e1', lineHeight: 1.7, maxWidth: 320 }}>
-              🎯 手指在畫面下方「向上滑動」朝目標方向直線丟出垃圾！<br />
-              🚮 垃圾桶會左右移動，瞄準方向丟進正確分類！<br />
+              🎯 手指在畫面下方「向上滑動」朝目標方向直線丟出垃圾，左側力道條顯示丟擲力道！<br />
+              🚮 垃圾桶會左右移動，過一陣子還會被推開重新排列，甚至像籃球機一樣搖晃！<br />
               🙅 混進來的「老人家」「女友」別丟進桶子！按旁邊「放下」鍵安全帶開，丟垃圾時按錯放下扣 50 分！<br />
               🚛 最後 10 秒垃圾車突襲，輕鬆點擊消滅垃圾拿 Bonus！
             </div>
