@@ -6,6 +6,7 @@ import stage3 from './assets/stage_3.png'
 import stage4 from './assets/stage_4.png'
 import { LEVELS, LevelDef } from './gameData'
 import { loadHistory, getBestForLevel, PlayRecord } from './leaderboard'
+import { loadProfile, saveProfile, getLevelInfo } from './player'
 
 const STAGE_IMAGES: Record<number, string> = { 1: stage1, 2: stage2, 3: stage3, 4: stage4 }
 
@@ -23,10 +24,23 @@ export default function Lobby({ onPlay }: LobbyProps) {
   const [selectedLevel, setSelectedLevel] = useState<number | null>(1)
   const [history, setHistory] = useState<PlayRecord[]>(() => loadHistory())
   const [showLeaderboard, setShowLeaderboard] = useState(false)
+  const [profile, setProfile] = useState(() => loadProfile())
+  const [editingName, setEditingName] = useState(false)
+  const [nameDraft, setNameDraft] = useState('')
   const [, forceUpdate] = useState(0)
 
   // Re-read play history on mount (might have changed after a game)
   useEffect(() => { setHistory(loadHistory()) }, [])
+
+  const levelInfo = getLevelInfo(history)
+
+  const commitName = () => {
+    const trimmed = nameDraft.trim().slice(0, 10) || profile.name
+    const updated = { ...profile, name: trimmed }
+    setProfile(updated)
+    saveProfile(updated)
+    setEditingName(false)
+  }
 
   // Recalculate layout on resize
   useEffect(() => {
@@ -106,16 +120,79 @@ export default function Lobby({ onPlay }: LobbyProps) {
         )
       })}
 
-      {/* Top gradient bar — title + leaderboard */}
+      {/* Top gradient bar — player card + leaderboard */}
       <div style={{
         position: 'absolute', top: 0, left: 0, right: 0,
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: `${Math.round(10 * scale)}px ${Math.round(16 * scale)}px`,
         background: 'linear-gradient(180deg,rgba(0,0,0,0.7) 0%,rgba(0,0,0,0) 100%)',
       }}>
-        <div style={{ color: '#f0c040', fontSize: Math.round(20 * scale), fontWeight: 800, textShadow: '0 2px 8px rgba(0,0,0,0.8)', pointerEvents: 'none' }}>
-          🍱 便當接接樂
+        {/* Player card — avatar, editable name, level & XP bar */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: Math.round(8 * scale),
+          background: 'rgba(10,20,45,0.6)', border: '1px solid rgba(255,255,255,0.15)',
+          borderRadius: 14, padding: Math.round(4 * scale),
+          maxWidth: '62%',
+        }}>
+          <div style={{
+            width: Math.round(38 * scale), height: Math.round(38 * scale), borderRadius: '50%',
+            background: 'rgba(255,255,255,0.1)', border: '2px solid rgba(240,192,64,0.6)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: Math.round(19 * scale), flexShrink: 0,
+          }}>{profile.avatar}</div>
+
+          <div style={{ minWidth: 0 }}>
+            {editingName ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <input
+                  value={nameDraft}
+                  onChange={e => setNameDraft(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') commitName(); if (e.key === 'Escape') setEditingName(false) }}
+                  autoFocus
+                  maxLength={10}
+                  style={{
+                    width: Math.round(72 * scale), fontSize: Math.round(12 * scale),
+                    padding: '2px 5px', borderRadius: 5, border: '1px solid rgba(240,192,64,0.6)',
+                    background: 'rgba(0,0,0,0.45)', color: '#fff', fontFamily: 'sans-serif',
+                  }}
+                />
+                <button
+                  onPointerDown={commitName}
+                  style={{
+                    background: 'rgba(74,222,128,0.25)', border: '1px solid #4ade80', color: '#4ade80',
+                    borderRadius: 5, fontSize: Math.round(11 * scale), padding: '2px 7px',
+                    cursor: 'pointer', touchAction: 'manipulation',
+                  }}
+                >✓</button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                <span style={{
+                  color: '#fff', fontWeight: 700, fontSize: Math.round(13 * scale),
+                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                }}>Lv.{levelInfo.level} {profile.name}</span>
+                <button
+                  onPointerDown={() => { setNameDraft(profile.name); setEditingName(true) }}
+                  style={{
+                    background: 'none', border: 'none', color: '#9fb3d9', cursor: 'pointer',
+                    fontSize: Math.round(12 * scale), padding: 0, touchAction: 'manipulation',
+                  }}
+                  aria-label="修改名稱"
+                >✏️</button>
+              </div>
+            )}
+            <div style={{
+              marginTop: 3, width: Math.round(108 * scale), height: 7,
+              background: 'rgba(255,255,255,0.18)', borderRadius: 5, overflow: 'hidden',
+            }}>
+              <div style={{
+                width: `${Math.round(levelInfo.progress * 100)}%`, height: '100%',
+                background: 'linear-gradient(90deg,#f0c040,#f0a020)',
+              }} />
+            </div>
+          </div>
         </div>
+
         <button
           onPointerDown={() => { setHistory(loadHistory()); setShowLeaderboard(true) }}
           style={{
