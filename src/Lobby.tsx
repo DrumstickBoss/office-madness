@@ -16,13 +16,15 @@ const STAGE_IMAGES: Record<number, string> = { 1: stage1, 2: stage2, 3: stage3, 
 // isolates just the head/face for the leaderboard's crown badge portrait.
 const MASCOT_HEAD_CROP = { x: 220, y: 60, size: 580, natural: 1024 }
 
-// Renders a circular crop of just the mascot's head at any target diameter,
-// by scaling the full image up and shifting it so the head crop lands in view.
-function MascotHead({ size }: { size: number }) {
+// Renders a crop of just the mascot's head at any target size, by scaling the
+// full image up and shifting it so the head crop lands in view. `radius`
+// defaults to a circle but accepts any border-radius (e.g. for the rounded-
+// square portrait frames used in the player card / start button).
+function MascotHead({ size, radius = '50%' }: { size: number; radius?: number | string }) {
   const scale = size / MASCOT_HEAD_CROP.size
   const imgSize = MASCOT_HEAD_CROP.natural * scale
   return (
-    <div style={{ width: size, height: size, borderRadius: '50%', overflow: 'hidden', position: 'relative', flexShrink: 0 }}>
+    <div style={{ width: size, height: size, borderRadius: radius, overflow: 'hidden', position: 'relative', flexShrink: 0 }}>
       <img
         src={mascot}
         alt=""
@@ -48,7 +50,7 @@ interface LobbyProps {
 }
 
 export default function Lobby({ onPlay }: LobbyProps) {
-  const [selectedLevel, setSelectedLevel] = useState<number | null>(1)
+  const [selectedLevel, setSelectedLevel] = useState<number | null>(null)
   const [history, setHistory] = useState<PlayRecord[]>(() => loadHistory())
   const [showLeaderboard, setShowLeaderboard] = useState(false)
   const [boardTab, setBoardTab] = useState(LEVELS[0].id)
@@ -148,6 +150,10 @@ export default function Lobby({ onPlay }: LobbyProps) {
           0%, 100% { opacity: 1;   transform: scale(1);    }
           50%      { opacity: 0.75; transform: scale(1.14); }
         }
+        @keyframes levelRingPulse {
+          0%, 100% { opacity: 1;   transform: translate(-50%,-50%) scale(1);    }
+          50%      { opacity: 0.6; transform: translate(-50%,-50%) scale(1.06); }
+        }
       `}</style>
 
       {/* Level buttons — positioned over the circles in the background art */}
@@ -159,7 +165,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
             key={level.id}
             onPointerDown={() => { if (level.unlocked) setSelectedLevel(level.id) }}
             style={{
-              position: 'absolute',
+              position: 'absolute', zIndex: 2,
               left: imgLeft + fx * imgW, top: imgTop + fy * imgH,
               transform: `translate(-50%,-50%) scale(${isSelected ? 1.18 : 1})`,
               width: btnW,
@@ -170,16 +176,29 @@ export default function Lobby({ onPlay }: LobbyProps) {
             }}
           >
             {/* Glow halo — a soft pulsing disc behind the stage art, in a bright
-                contrasting hot-pink/cyan (rather than the level's own accent, which
-                tended to blend into the art) so the selection reads clearly. */}
+                gold/yellow (matching the game's UI accent) so the selection reads
+                clearly against any of the four background circles. */}
             {isSelected && (
               <div style={{
                 position: 'absolute', left: '50%', top: '50%',
                 width: '92%', height: '92%',
                 transform: 'translate(-50%,-50%)',
                 borderRadius: '50%',
-                background: 'radial-gradient(circle, rgba(255,60,180,0.85) 0%, rgba(255,60,180,0.45) 45%, rgba(255,60,180,0) 72%)',
+                background: 'radial-gradient(circle, rgba(255,214,0,0.9) 0%, rgba(255,193,7,0.5) 45%, rgba(255,193,7,0) 72%)',
                 animation: 'levelGlowPulse 1.1s ease-in-out infinite',
+                pointerEvents: 'none',
+              }} />
+            )}
+            {/* Crisp gold outline ring — the glow alone read as "weak"; a solid
+                ring around the stage art makes the selected node unmistakable. */}
+            {isSelected && (
+              <div style={{
+                position: 'absolute', left: '50%', top: '50%',
+                width: '104%', height: '104%',
+                borderRadius: '50%',
+                border: '4px solid #ffd700',
+                boxShadow: '0 0 14px 2px rgba(255,214,0,0.9)',
+                animation: 'levelRingPulse 1.1s ease-in-out infinite',
                 pointerEvents: 'none',
               }} />
             )}
@@ -190,7 +209,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
               style={{
                 width: '100%', display: 'block', pointerEvents: 'none', position: 'relative',
                 filter: isSelected
-                  ? 'drop-shadow(0 0 10px #fff) drop-shadow(0 0 22px #ff3cb4) drop-shadow(0 0 42px #ff3cb4)'
+                  ? 'drop-shadow(0 0 10px #fff) drop-shadow(0 0 22px #ffd700) drop-shadow(0 0 42px #ffc107)'
                   : 'drop-shadow(0 3px 8px rgba(0,0,0,0.5))',
               }}
             />
@@ -232,19 +251,18 @@ export default function Lobby({ onPlay }: LobbyProps) {
         padding: `${Math.round(10 * scale)}px ${Math.round(16 * scale)}px`,
         background: 'linear-gradient(180deg,rgba(0,0,0,0.7) 0%,rgba(0,0,0,0) 100%)',
       }}>
-        {/* Player card — avatar, editable name, level & XP bar */}
+        {/* Player card — mascot portrait, editable name, level & XP bar */}
         <div style={{
-          display: 'flex', alignItems: 'center', gap: Math.round(8 * scale),
-          background: 'rgba(10,20,45,0.6)', border: '1px solid rgba(255,255,255,0.15)',
-          borderRadius: 14, padding: Math.round(4 * scale),
-          maxWidth: '62%',
+          display: 'flex', alignItems: 'center', gap: Math.round(10 * scale),
+          background: 'rgba(10,20,45,0.72)', border: '1px solid rgba(240,192,64,0.35)',
+          borderRadius: 16, padding: Math.round(6 * scale),
+          boxShadow: '0 4px 14px rgba(0,0,0,0.35)',
+          maxWidth: '66%',
         }}>
-          <div style={{
-            width: Math.round(38 * scale), height: Math.round(38 * scale), borderRadius: '50%',
-            background: 'rgba(255,255,255,0.1)', border: '2px solid rgba(240,192,64,0.6)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: Math.round(19 * scale), flexShrink: 0,
-          }}>{profile.avatar}</div>
+          <MascotHead
+            size={Math.round(52 * scale)}
+            radius={Math.round(10 * scale)}
+          />
 
           <div style={{ minWidth: 0 }}>
             {editingName ? (
@@ -271,29 +289,35 @@ export default function Lobby({ onPlay }: LobbyProps) {
                 >✓</button>
               </div>
             ) : (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{
-                  color: '#fff', fontWeight: 700, fontSize: Math.round(13 * scale),
+                  color: '#ffe27a', fontWeight: 800, fontSize: Math.round(18 * scale),
                   whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                  textShadow: '0 1px 4px rgba(0,0,0,0.5)',
                 }}>Lv.{levelInfo.level} {profile.name}</span>
                 <button
                   onPointerDown={() => { setNameDraft(profile.name); setEditingName(true) }}
                   style={{
                     background: 'none', border: 'none', color: '#9fb3d9', cursor: 'pointer',
-                    fontSize: Math.round(12 * scale), padding: 0, touchAction: 'manipulation',
+                    fontSize: Math.round(13 * scale), padding: 0, touchAction: 'manipulation',
                   }}
                   aria-label="修改名稱"
                 >✏️</button>
               </div>
             )}
-            <div style={{
-              marginTop: 3, width: Math.round(108 * scale), height: 7,
-              background: 'rgba(255,255,255,0.18)', borderRadius: 5, overflow: 'hidden',
-            }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
               <div style={{
-                width: `${Math.round(levelInfo.progress * 100)}%`, height: '100%',
-                background: 'linear-gradient(90deg,#f0c040,#f0a020)',
-              }} />
+                width: Math.round(120 * scale), height: 9,
+                background: 'rgba(255,255,255,0.18)', borderRadius: 5, overflow: 'hidden',
+              }}>
+                <div style={{
+                  width: `${Math.round(levelInfo.progress * 100)}%`, height: '100%',
+                  background: 'linear-gradient(90deg,#f0c040,#f0a020)',
+                }} />
+              </div>
+              <span style={{ color: '#fff', fontWeight: 700, fontSize: Math.round(12 * scale) }}>
+                {Math.round(levelInfo.progress * 100)}%
+              </span>
             </div>
           </div>
         </div>
@@ -322,12 +346,17 @@ export default function Lobby({ onPlay }: LobbyProps) {
         </div>
       </div>
 
-      {/* Bottom stack — goal card + start button (with player avatar) */}
-      <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, display: 'flex', flexDirection: 'column', gap: Math.round(8 * scale) }}>
-        {/* Goal card */}
+      {/* Bottom bar — goal card sits to the left of the start button, both in one row */}
+      <div style={{
+        position: 'absolute', bottom: 0, left: 0, right: 0,
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: Math.round(10 * scale),
+        padding: `${Math.round(10 * scale)}px ${Math.round(14 * scale)}px`,
+        background: 'linear-gradient(0deg,rgba(0,0,0,0.8) 0%,rgba(0,0,0,0) 100%)',
+      }}>
+        {/* Goal card — grows to fill space on narrow screens but caps out on wide
+            ones instead of stretching into an awkward empty-looking bar. */}
         <div style={{
-          display: 'flex', alignItems: 'center', gap: Math.round(10 * scale),
-          margin: `0 ${Math.round(14 * scale)}px`,
+          flex: '0 1 460px', minWidth: 0, display: 'flex', alignItems: 'center', gap: Math.round(10 * scale),
           background: 'rgba(10,20,45,0.82)', border: '1px solid rgba(255,255,255,0.15)',
           borderRadius: 12, padding: Math.round(8 * scale),
         }}>
@@ -338,44 +367,47 @@ export default function Lobby({ onPlay }: LobbyProps) {
             fontSize: Math.round(17 * scale), boxShadow: '0 2px 6px rgba(0,0,0,0.4)',
           }}>🏆</div>
           <div style={{ minWidth: 0 }}>
-            <div style={{ color: '#fff', fontWeight: 700, fontSize: Math.round(13 * scale) }}>
+            <div style={{
+              color: '#fff', fontWeight: 700, fontSize: Math.round(13 * scale),
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            }}>
               下一個目標：打敗自己！
             </div>
-            <div style={{ color: '#9fb3d9', fontSize: Math.round(11 * scale), marginTop: 1 }}>
+            <div style={{
+              color: '#9fb3d9', fontSize: Math.round(11 * scale), marginTop: 1,
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            }}>
               刷新你的最高分，贏得更多榮耀！
             </div>
           </div>
         </div>
 
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: Math.round(8 * scale),
-          padding: `${Math.round(10 * scale)}px ${Math.round(14 * scale)}px`,
-          background: 'linear-gradient(0deg,rgba(0,0,0,0.75) 0%,rgba(0,0,0,0) 100%)',
-        }}>
-          <div style={{
-            width: Math.round(38 * scale), height: Math.round(38 * scale), borderRadius: '50%',
-            background: 'rgba(255,255,255,0.1)', border: `2px solid #000`,
-            boxShadow: '0 0 0 2px rgba(240,192,64,0.6)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: Math.round(19 * scale), flexShrink: 0,
-          }}>{profile.avatar}</div>
-          <button
-            onPointerDown={() => { if (canStart && selectedLevel != null) onPlay(selectedLevel) }}
-            style={{
-              padding: `${Math.round(11 * scale)}px ${Math.round(24 * scale)}px`,
-              background: canStart ? 'linear-gradient(135deg,#f0a020,#e06010)' : 'rgba(60,60,60,0.7)',
-              color: canStart ? '#fff' : '#666',
-              border: canStart ? '3px solid #000' : '2px solid #444',
-              boxShadow: canStart ? '0 0 0 2px #f0c040, 0 4px 20px rgba(240,160,32,0.5)' : 'none',
-              borderRadius: Math.round(10 * scale),
-              fontWeight: 700, fontSize: Math.round(16 * scale),
-              cursor: canStart ? 'pointer' : 'not-allowed',
-              fontFamily: 'sans-serif', whiteSpace: 'nowrap',
-              touchAction: 'manipulation',
-              textShadow: canStart ? '0 1px 4px rgba(0,0,0,0.4)' : 'none',
-            }}
-          >{canStart ? '開始挑戰 →' : '選擇關卡'}</button>
-        </div>
+        {/* Start button — mascot portrait sits inside, left of the label */}
+        <button
+          onPointerDown={() => { if (canStart && selectedLevel != null) onPlay(selectedLevel) }}
+          style={{
+            display: 'flex', alignItems: 'center', gap: Math.round(8 * scale), flexShrink: 0,
+            padding: `${Math.round(6 * scale)}px ${Math.round(20 * scale)}px ${Math.round(6 * scale)}px ${Math.round(6 * scale)}px`,
+            background: canStart ? 'linear-gradient(135deg,#f0a020,#e06010)' : 'rgba(60,60,60,0.7)',
+            color: canStart ? '#fff' : '#666',
+            border: canStart ? '3px solid #000' : '2px solid #444',
+            boxShadow: canStart ? '0 0 0 2px #f0c040, 0 4px 20px rgba(240,160,32,0.5)' : 'none',
+            borderRadius: Math.round(12 * scale),
+            fontWeight: 700, fontSize: Math.round(16 * scale),
+            cursor: canStart ? 'pointer' : 'not-allowed',
+            fontFamily: 'sans-serif', whiteSpace: 'nowrap',
+            touchAction: 'manipulation',
+            textShadow: canStart ? '0 1px 4px rgba(0,0,0,0.4)' : 'none',
+          }}
+        >
+          <div style={{ filter: canStart ? 'none' : 'grayscale(1) brightness(0.7)' }}>
+            <MascotHead
+              size={Math.round(38 * scale)}
+              radius={Math.round(9 * scale)}
+            />
+          </div>
+          <span>{canStart ? '開始挑戰 →' : '選擇關卡'}</span>
+        </button>
       </div>
 
       {/* Leaderboard modal — every play is recorded in localStorage. Styled like a

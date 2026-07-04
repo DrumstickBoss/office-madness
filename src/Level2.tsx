@@ -10,7 +10,7 @@ let CH = isPortraitViewport() ? 700 : 480
 
 // ─── Game tuning ───────────────────────────────────────────────────────────
 const THROW_PHASE_MS = 45_000
-const BONUS_PHASE_MS = 10_000
+const BONUS_PHASE_MS = 14_000
 const TOTAL_MS = THROW_PHASE_MS + BONUS_PHASE_MS
 const GRAVITY = 420 // px/s² — only applied to Bonus Time items; low enough that they arc up to mid-screen
 const DRAG_K = 4.2 // swipe px → launch velocity px/s (throws travel in a straight line)
@@ -260,6 +260,12 @@ interface GameState {
   decoyHintUntil: number
   warningPlayed: boolean
   warningBeepSecond: number
+  hasSlicedOnce: boolean // Bonus Time — whether the player has dragged/sliced yet
+}
+
+function spawnTrashItem(): QueueItem {
+  const t = pick(TRASH_ITEMS)
+  return { kind: 'trash', category: t.category, icon: t.icon, label: t.label }
 }
 
 function spawnQueueItem(): QueueItem {
@@ -267,8 +273,7 @@ function spawnQueueItem(): QueueItem {
     const d = pick(DECOYS)
     return { kind: 'decoy', icon: d.icon, label: d.label }
   }
-  const t = pick(TRASH_ITEMS)
-  return { kind: 'trash', category: t.category, icon: t.icon, label: t.label }
+  return spawnTrashItem()
 }
 
 // Advances to the next queue item, arming a one-time "don't throw me" tooltip
@@ -302,13 +307,16 @@ function initState(best: number): GameState {
     lastFrameTs: 0, elapsed: 0,
     bins: makeBins(), binTransition: 'idle', binTransitionStart: 0, binReorderTriggered: false,
     flying: [], popups: [],
-    queueItem: spawnQueueItem(),
+    // First item is always plain trash — a decoy as the very first thing the
+    // player sees would need its "don't throw me" hint before they've thrown
+    // anything at all, which crowded straight into the swipe-to-throw hint.
+    queueItem: spawnTrashItem(),
     aiming: false, aimStart: null, aimCurrent: null, sliceTrail: [],
     shakeUntil: 0, flashUntil: 0, flashColor: '#ff3030',
     idCounter: 1, bonusAudioStarted: false,
     truckX: -160, truckActive: false, bonusSpawnAt: 0, bonusBannerUntil: 0, bonusIntroUntil: 0,
     lastPenaltyMsg: null,
-    hasThrownOnce: false,
+    hasThrownOnce: false, hasSlicedOnce: false,
     decoyHintShownEver: false, decoyHintActive: false, decoyHintUntil: 0,
     warningPlayed: false, warningBeepSecond: 0,
   }
@@ -722,6 +730,44 @@ function drawDecoyHint(ctx: CanvasRenderingContext2D, gs: GameState, now: number
   ctx.restore()
 }
 
+// Bonus Time's gesture (drag-to-slice) isn't obvious from "click" alone — this
+// animates a finger dragging back and forth with a trailing line, and keeps
+// showing until the player actually drags once, however long that takes.
+function drawSliceHint(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
+  if (gs.hasSlicedOnce || now < gs.bonusIntroUntil) return
+  const cycle = 1100
+  const t = (now % cycle) / cycle // 0..1
+  const swing = t < 0.5 ? t / 0.5 : 1 - (t - 0.5) / 0.5 // 0→1→0, so the hand slides out and back
+  const startX = CW * 0.3, endX = CW * 0.7
+  const y = CH * 0.46
+  const x = startX + (endX - startX) * swing
+
+  ctx.save()
+  ctx.globalAlpha = 0.95
+  ctx.strokeStyle = 'rgba(255,255,255,0.75)'
+  ctx.lineWidth = 5
+  ctx.lineCap = 'round'
+  ctx.setLineDash([2, 10])
+  ctx.beginPath()
+  ctx.moveTo(startX, y)
+  ctx.lineTo(x, y)
+  ctx.stroke()
+  ctx.setLineDash([])
+
+  ctx.font = EMOJI_FONT(36)
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.shadowColor = 'rgba(0,0,0,0.6)'
+  ctx.shadowBlur = 8
+  ctx.fillText('👆', x, y)
+
+  ctx.font = 'bold 15px sans-serif'
+  ctx.fillStyle = '#fff'
+  ctx.shadowBlur = 6
+  ctx.fillText('手指「劃過」垃圾來消滅它！', CW / 2, y - 42)
+  ctx.restore()
+}
+
 function drawPopups(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   for (const p of gs.popups) {
     const age = (now - p.born) / 900
@@ -768,7 +814,7 @@ function drawBonusIntro(ctx: CanvasRenderingContext2D, gs: GameState, now: numbe
   ctx.font = 'bold 15px sans-serif'
   ctx.fillStyle = '#fff'
   ctx.shadowBlur = 6
-  ctx.fillText('瘋狂點擊消滅垃圾拿 Bonus！', 0, 20)
+  ctx.fillText('手指劃過垃圾消滅它們拿 Bonus！', 0, 20)
   ctx.restore()
 }
 
@@ -854,6 +900,7 @@ function render(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
     drawSwipeHint(ctx, gs, now)
     drawDecoyHint(ctx, gs, now)
   }
+  if (gs.phase === 'bonus') drawSliceHint(ctx, gs, now)
   drawPopups(ctx, gs, now)
   drawHUD(ctx, gs, now)
   if (gs.phase === 'bonus') drawBonusIntro(ctx, gs, now)
@@ -960,6 +1007,7 @@ export default function Level2({ onBack }: Level2Props) {
     if (gs.phase === 'throw' && gs.aiming) {
       gs.aimCurrent = p
     } else if (gs.phase === 'bonus' && gs.sliceTrail.length) {
+      gs.hasSlicedOnce = true
       const last = gs.sliceTrail[gs.sliceTrail.length - 1]
       trySlice(gs, last.x, last.y, p.x, p.y, performance.now())
       gs.sliceTrail.push(p)
@@ -1078,7 +1126,7 @@ export default function Level2({ onBack }: Level2Props) {
             <div style={{ fontSize: 13, color: '#cbd5e1', lineHeight: 1.7, maxWidth: 320 }}>
               🎯 向上滑動把垃圾丟進正確的桶子！<br />
               🙅 混進來的「老人家」「女友」別丟進桶子！<br />
-              🚛 最後倒數垃圾車會來襲，點擊消滅垃圾拿 Bonus！
+              🚛 最後倒數垃圾車會來襲，手指劃過垃圾消滅它們拿 Bonus！
             </div>
             <div style={{ fontSize: 11, color: '#7a8bab' }}>
               （放心，遊戲中會即時提示怎麼玩）
