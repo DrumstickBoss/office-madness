@@ -4,12 +4,38 @@ import stage1 from './assets/stage_1.png'
 import stage2 from './assets/stage_2.png'
 import stage3 from './assets/stage_3.png'
 import stage4 from './assets/stage_4.png'
+import mascot from './assets/mascot.png'
 import { LEVELS, LevelDef, getStars } from './gameData'
 import { loadHistory, getBestForLevel, PlayRecord } from './leaderboard'
 import { loadProfile, saveProfile, getLevelInfo } from './player'
 import { startLobbyBgm, stopLobbyBgm, loadBgmMuted, saveBgmMuted } from './bgm'
 
 const STAGE_IMAGES: Record<number, string> = { 1: stage1, 2: stage2, 3: stage3, 4: stage4 }
+
+// mascot.png is a 1024x1024 full-body render — this crop box (in source px)
+// isolates just the head/face for the leaderboard's crown badge portrait.
+const MASCOT_HEAD_CROP = { x: 220, y: 60, size: 580, natural: 1024 }
+
+// Renders a circular crop of just the mascot's head at any target diameter,
+// by scaling the full image up and shifting it so the head crop lands in view.
+function MascotHead({ size }: { size: number }) {
+  const scale = size / MASCOT_HEAD_CROP.size
+  const imgSize = MASCOT_HEAD_CROP.natural * scale
+  return (
+    <div style={{ width: size, height: size, borderRadius: '50%', overflow: 'hidden', position: 'relative', flexShrink: 0 }}>
+      <img
+        src={mascot}
+        alt=""
+        draggable={false}
+        style={{
+          position: 'absolute',
+          width: imgSize, height: imgSize,
+          left: -MASCOT_HEAD_CROP.x * scale, top: -MASCOT_HEAD_CROP.y * scale,
+        }}
+      />
+    </div>
+  )
+}
 
 const formatTs = (ts: number): string => {
   const d = new Date(ts)
@@ -352,7 +378,9 @@ export default function Lobby({ onPlay }: LobbyProps) {
         </div>
       </div>
 
-      {/* Leaderboard modal — every play is recorded in localStorage */}
+      {/* Leaderboard modal — every play is recorded in localStorage. Styled like a
+          mobile-game rankings panel (à la KartRider Rush+): a crown + mascot-head
+          badge straddles the top edge, dark gemstone-frame body underneath. */}
       {showLeaderboard && (
         <div
           onPointerDown={() => setShowLeaderboard(false)}
@@ -364,100 +392,125 @@ export default function Lobby({ onPlay }: LobbyProps) {
         >
           <div
             onPointerDown={e => e.stopPropagation()}
-            style={{
-              width: '100%', maxWidth: 340, maxHeight: '78%',
-              background: 'linear-gradient(160deg,#12203f,#0a1730)',
-              border: '2px solid rgba(240,192,64,0.5)', borderRadius: 16,
-              display: 'flex', flexDirection: 'column', overflow: 'hidden',
-              boxShadow: '0 8px 30px rgba(0,0,0,0.6)',
-            }}
+            style={{ position: 'relative', width: '76%', maxWidth: 560, maxHeight: '82%' }}
           >
+            {/* Crown + mascot badge — a sibling of the panel (not clipped by its
+                overflow:hidden), straddling the top border like a season-pass tier icon. */}
             <div style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              padding: '12px 16px', borderBottom: '1px solid rgba(240,192,64,0.3)',
+              position: 'absolute', top: 0, left: '50%', transform: 'translate(-50%,-56%)',
+              zIndex: 3, display: 'flex', flexDirection: 'column', alignItems: 'center',
             }}>
-              <div style={{ color: '#f0c040', fontWeight: 800, fontSize: 18 }}>🏆 排行榜</div>
-              <button
-                onPointerDown={() => setShowLeaderboard(false)}
-                style={{
-                  background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.3)',
-                  borderRadius: 8, color: '#fff', width: 28, height: 28, cursor: 'pointer',
-                  fontFamily: 'sans-serif', touchAction: 'manipulation',
-                }}
-              >✕</button>
+              <span style={{ fontSize: 34, marginBottom: -18, filter: 'drop-shadow(0 3px 5px rgba(0,0,0,0.6))' }}>👑</span>
+              <div style={{
+                borderRadius: '50%', padding: 3,
+                background: 'linear-gradient(135deg,#fff2b8,#f0a020)',
+                boxShadow: '0 4px 16px rgba(0,0,0,0.55)',
+              }}>
+                <div style={{ borderRadius: '50%', border: '3px solid #0a1730', overflow: 'hidden', display: 'flex' }}>
+                  <MascotHead size={68} />
+                </div>
+              </div>
             </div>
 
-            {/* One tab per game — each keeps its own top-10 high-score table, since
-                raw scores aren't comparable across games with different point scales. */}
-            <div style={{ display: 'flex', gap: 4, padding: '10px 12px 0' }}>
-              {LEVELS.map(lvl => {
-                const active = boardTab === lvl.id
-                return (
-                  <button
-                    key={lvl.id}
-                    onPointerDown={() => setBoardTab(lvl.id)}
-                    style={{
-                      flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4,
-                      padding: '6px 4px', borderRadius: 10,
-                      background: active ? 'rgba(240,192,64,0.22)' : 'rgba(255,255,255,0.05)',
-                      border: active ? '1px solid rgba(240,192,64,0.7)' : '1px solid rgba(255,255,255,0.1)',
-                      color: active ? '#f0c040' : '#93a3c0',
-                      fontWeight: active ? 800 : 600, fontSize: 11,
-                      cursor: 'pointer', touchAction: 'manipulation', whiteSpace: 'nowrap', overflow: 'hidden',
-                    }}
-                  >
-                    <span style={{ fontSize: 14 }}>{lvl.icon}</span>
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{lvl.name}</span>
-                  </button>
-                )
-              })}
-            </div>
+            {/* Panel body */}
+            <div style={{
+              width: '100%', maxHeight: '100%', marginTop: 30,
+              background: 'linear-gradient(160deg,#182f5c,#070f24)',
+              border: '3px solid rgba(240,192,64,0.6)', borderRadius: 22,
+              display: 'flex', flexDirection: 'column', overflow: 'hidden',
+              boxShadow: '0 0 0 4px rgba(240,192,64,0.15), 0 10px 36px rgba(0,0,0,0.65)',
+            }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '30px 18px 8px',
+              }}>
+                <div style={{
+                  flex: 1, textAlign: 'center', color: '#ffe27a', fontWeight: 900, fontSize: 24,
+                  letterSpacing: 3, textShadow: '0 2px 8px rgba(0,0,0,0.7)',
+                }}>排行榜</div>
+                <button
+                  onPointerDown={() => setShowLeaderboard(false)}
+                  style={{
+                    position: 'absolute', right: 14, top: 14,
+                    background: 'rgba(255,255,255,0.12)', border: '1px solid rgba(255,255,255,0.35)',
+                    borderRadius: 8, color: '#fff', width: 30, height: 30, cursor: 'pointer', fontSize: 15,
+                    fontFamily: 'sans-serif', touchAction: 'manipulation',
+                  }}
+                >✕</button>
+              </div>
 
-            <div style={{ overflowY: 'auto', padding: '10px 12px', minHeight: 120 }}>
-              {(() => {
-                const activeLevel = LEVELS.find(l => l.id === boardTab) ?? LEVELS[0]
-                if (!activeLevel.unlocked) {
+              {/* One tab per game — each keeps its own top-10 high-score table, since
+                  raw scores aren't comparable across games with different point scales. */}
+              <div style={{ display: 'flex', gap: 6, padding: '8px 16px 0' }}>
+                {LEVELS.map(lvl => {
+                  const active = boardTab === lvl.id
                   return (
-                    <div style={{ color: '#93a3c0', textAlign: 'center', padding: '30px 10px', fontSize: 13 }}>
-                      {activeLevel.desc}
-                    </div>
+                    <button
+                      key={lvl.id}
+                      onPointerDown={() => setBoardTab(lvl.id)}
+                      style={{
+                        flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2,
+                        padding: '6px 2px', borderRadius: 12,
+                        background: active ? 'rgba(240,192,64,0.24)' : 'rgba(255,255,255,0.06)',
+                        border: active ? '1px solid rgba(240,192,64,0.8)' : '1px solid rgba(255,255,255,0.12)',
+                        color: active ? '#ffe27a' : '#aebbdb',
+                        fontWeight: active ? 800 : 600, fontSize: 11,
+                        cursor: 'pointer', touchAction: 'manipulation', lineHeight: 1.15,
+                      }}
+                    >
+                      <span style={{ fontSize: 16 }}>{lvl.icon}</span>
+                      <span>{lvl.name}</span>
+                    </button>
                   )
-                }
-                const boardRows = history
-                  .filter(r => r.levelId === boardTab)
-                  .sort((a, b) => b.score - a.score)
-                  .slice(0, 10)
-                if (boardRows.length === 0) {
-                  return (
-                    <div style={{ color: '#93a3c0', textAlign: 'center', padding: '30px 10px', fontSize: 13 }}>
-                      這關還沒有紀錄，快去挑戰拿高分吧！
+                })}
+              </div>
+
+              <div style={{ overflowY: 'auto', padding: '14px 18px 20px', minHeight: 140 }}>
+                {(() => {
+                  const activeLevel = LEVELS.find(l => l.id === boardTab) ?? LEVELS[0]
+                  if (!activeLevel.unlocked) {
+                    return (
+                      <div style={{ color: '#aebbdb', textAlign: 'center', padding: '34px 10px', fontSize: 16 }}>
+                        {activeLevel.desc}
+                      </div>
+                    )
+                  }
+                  const boardRows = history
+                    .filter(r => r.levelId === boardTab)
+                    .sort((a, b) => b.score - a.score)
+                    .slice(0, 10)
+                  if (boardRows.length === 0) {
+                    return (
+                      <div style={{ color: '#aebbdb', textAlign: 'center', padding: '34px 10px', fontSize: 16 }}>
+                        這關還沒有紀錄，快去挑戰拿高分吧！
+                      </div>
+                    )
+                  }
+                  const RANK_MEDAL = ['🥇', '🥈', '🥉']
+                  const rankFontSize = (i: number) => (i === 0 ? 32 : i === 1 ? 26 : i === 2 ? 22 : 17)
+                  const rankColor = (i: number) => (i === 0 ? '#ffd700' : i === 1 ? '#f2f5fb' : i === 2 ? '#e6a662' : '#dbe4f5')
+                  return boardRows.map((r, i) => (
+                    <div
+                      key={`${r.ts}-${i}`}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 12,
+                        padding: i < 3 ? '11px 8px' : '8px 8px',
+                        borderBottom: '1px solid rgba(255,255,255,0.1)',
+                      }}
+                    >
+                      <div style={{ width: 36, textAlign: 'center', lineHeight: 1 }}>
+                        {i < 3
+                          ? <span style={{ fontSize: rankFontSize(i) }}>{RANK_MEDAL[i]}</span>
+                          : <span style={{ color: '#aebbdb', fontWeight: 700, fontSize: 17 }}>{i + 1}</span>}
+                      </div>
+                      <div style={{ color: '#aebbdb', fontSize: 14, flex: 1 }}>{formatTs(r.ts)}</div>
+                      <div style={{ color: rankColor(i), fontWeight: 800, fontSize: rankFontSize(i), lineHeight: 1 }}>
+                        {r.score}
+                      </div>
                     </div>
-                  )
-                }
-                const RANK_MEDAL = ['🥇', '🥈', '🥉']
-                const rankFontSize = (i: number) => (i === 0 ? 26 : i === 1 ? 21 : i === 2 ? 18 : 13)
-                const rankColor = (i: number) => (i === 0 ? '#ffd700' : i === 1 ? '#e5eaf2' : i === 2 ? '#e0a870' : '#c7d2e6')
-                return boardRows.map((r, i) => (
-                  <div
-                    key={`${r.ts}-${i}`}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 10,
-                      padding: i < 3 ? '9px 6px' : '6px 6px',
-                      borderBottom: '1px solid rgba(255,255,255,0.08)',
-                    }}
-                  >
-                    <div style={{ width: 30, textAlign: 'center', lineHeight: 1 }}>
-                      {i < 3
-                        ? <span style={{ fontSize: rankFontSize(i) }}>{RANK_MEDAL[i]}</span>
-                        : <span style={{ color: '#7a8bab', fontWeight: 700, fontSize: 13 }}>{i + 1}</span>}
-                    </div>
-                    <div style={{ color: '#7a8bab', fontSize: 11, flex: 1 }}>{formatTs(r.ts)}</div>
-                    <div style={{ color: rankColor(i), fontWeight: 800, fontSize: rankFontSize(i), lineHeight: 1 }}>
-                      {r.score}
-                    </div>
-                  </div>
-                ))
-              })()}
+                  ))
+                })()}
+              </div>
             </div>
           </div>
         </div>
