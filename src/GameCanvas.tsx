@@ -16,7 +16,7 @@ const ITEM_SIZE = 50;
 const ITEM_SPAWN_MS = 1200;
 const CALL_SPAWN_MS = 10_000;
 const CALL_TIMEOUT_MS = 3000; // seconds before call auto-expires
-const FREEZE_MS = 3000; // freeze duration for any mistake
+const FREEZE_MS = 2000; // freeze duration for any mistake
 const GAME_DURATION_MS = 60_000; // 1-minute countdown
 const PLAYER_SPEED = 8; // px per frame at 60fps
 const SCORE_LEGIT_ANSWER = 20; // bonus for correctly answering legit call
@@ -24,6 +24,7 @@ const SCORE_LEGIT_MISS = -50; // missed legit call penalty
 const GAMEOVER_SCORE = -100; // game over threshold
 const SCORE_SPECIAL = 25; // bonus for catching today's special
 const FAT_DURATION_MS = 3000; // wrong-meal fat/slow duration
+const MISSION_TARGET = 500; // score target for the daily mission
 
 // ─── Meal catalogue ───────────────────────────────────────────────────────────
 const MEAL_FILES = [
@@ -125,6 +126,8 @@ interface GameState {
   dailySpecial: string[]; // today's two special meal filenames
   fat: boolean; // player ate wrong meal — slower
   fatUntil: number; // when fat effect expires
+  combo: number; // consecutive correct specials caught
+  maxCombo: number; // session best combo
 }
 
 // ─── Helper: random int in [min, max] ────────────────────────────────────────
@@ -246,100 +249,6 @@ function drawBackground(ctx: CanvasRenderingContext2D) {
   ctx.clearRect(0, 0, CW, CH);
 }
 
-function drawHUD(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
-  // Top bar backdrop (extended for daily-special row)
-  ctx.fillStyle = "rgba(0,0,0,0.55)";
-  ctx.fillRect(0, 0, CW, 82);
-
-  // ── Row 1: Score | Timer | HiScore ────────────────────────────────────────
-  ctx.fillStyle = "#fff";
-  ctx.font = "bold 20px sans-serif";
-  ctx.textAlign = "left";
-  ctx.fillText(`分數：${gs.score}`, 14, 26);
-
-  ctx.textAlign = "right";
-  ctx.fillStyle = "#f0c040";
-  ctx.fillText(`最高：${gs.hiScore}`, CW - 14, 26);
-
-  const sec = Math.ceil(gs.timeLeft / 1000);
-  ctx.textAlign = "center";
-  ctx.fillStyle = gs.timeLeft < 10000 ? "#f87171" : "#aad4ff";
-  ctx.font = "bold 16px sans-serif";
-  ctx.fillText(`⏱ ${sec}s`, CW / 2, 26);
-
-  // ── Row 2: Skill indicator ─────────────────────────────────────────────────
-  ctx.font = "13px sans-serif";
-  ctx.textAlign = "left";
-
-  if (gs.character === "bento") {
-    const filled = gs.comboActive ? 3 : gs.comboCount % 3;
-    const dots = Array.from({ length: 3 }, (_, i) =>
-      i < filled ? "●" : "○",
-    ).join(" ");
-    ctx.fillStyle = gs.comboActive ? "#f0c040" : "#aaa";
-    ctx.fillText(
-      `${dots}  ${gs.comboActive ? "✦ ×2 連擊中！" : "連擊進度"}`,
-      14,
-      46,
-    );
-  }
-
-  if (gs.character === "shield") {
-    const cooldown = Math.max(0, gs.nextShieldTime - now);
-    ctx.fillStyle = "#60a5fa";
-    const shieldIcons = "🛡️".repeat(gs.shields);
-    const coolStr =
-      gs.shields < MAX_SHIELDS ? `  充能 ${(cooldown / 1000).toFixed(1)}s` : "";
-    ctx.fillText(`${shieldIcons || "─"}${coolStr}`, 14, 46);
-  }
-
-  if (gs.character === "phone") {
-    const boostLeft = Math.max(0, gs.phoneBoostUntil - now);
-    if (boostLeft > 0) {
-      ctx.fillStyle = "rgba(244,114,182,0.45)";
-      ctx.fillRect(0, 48, CW * (boostLeft / PHONE_BOOST_MS), 4);
-      ctx.fillStyle = "#f472b6";
-      ctx.textAlign = "center";
-      ctx.fillText(`⚡ 靈敏模式 ${(boostLeft / 1000).toFixed(1)}s`, CW / 2, 46);
-    } else {
-      ctx.fillStyle = "#888";
-      ctx.fillText("正確接/掛電話 → 靈敏模式", 14, 46);
-    }
-  }
-
-  // ── Row 3: Daily special ───────────────────────────────────────────────────
-  ctx.fillStyle = "rgba(240,192,64,0.12)";
-  ctx.fillRect(0, 54, CW, 28);
-  ctx.strokeStyle = "#f0c040";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, 54);
-  ctx.lineTo(CW, 54);
-  ctx.stroke();
-
-  // Label
-  ctx.fillStyle = "#f0c040";
-  ctx.font = "bold 12px sans-serif";
-  ctx.textAlign = "left";
-  ctx.fillText("今日特餐 ✦", 10, 72);
-
-  // Two special food images
-  let ix = 92;
-  for (const sf of gs.dailySpecial) {
-    const img = IMG_CACHE.get(sf);
-    if (img && img.complete && img.naturalWidth > 0) {
-      ctx.drawImage(img, ix, 55, 26, 26);
-    }
-    ix += 32;
-  }
-
-  // +25 hint
-  ctx.fillStyle = "#4ade80";
-  ctx.font = "11px sans-serif";
-  ctx.textAlign = "right";
-  ctx.fillText(`接到 +${SCORE_SPECIAL}`, CW - 10, 72);
-}
-
 function drawFreezeOverlay(
   ctx: CanvasRenderingContext2D,
   msg: string | null,
@@ -384,29 +293,51 @@ function drawFreezeOverlay(
 }
 
 function drawIdleScreen(ctx: CanvasRenderingContext2D) {
-  ctx.fillStyle = "rgba(0,0,0,0.6)";
+  ctx.fillStyle = "rgba(0,0,0,0.72)";
   ctx.fillRect(0, 0, CW, CH);
 
+  const cx = CW / 2;
+  const top = CH / 2 - 130;
+
+  // Title
   ctx.textAlign = "center";
   ctx.fillStyle = "#f0c040";
   ctx.font = "bold 32px sans-serif";
-  ctx.fillText("🍱 便當接接樂", CW / 2, CH / 2 - 100);
+  ctx.fillText("🍱 便當接接樂", cx, top);
 
-  ctx.fillStyle = "#fff";
-  ctx.font = "18px sans-serif";
-  ctx.fillText("60秒內接便當得分，躲陷阱", CW / 2, CH / 2 - 50);
-  ctx.fillText("正確處理來電，別被定身！", CW / 2, CH / 2 - 24);
+  // Subtitle
+  ctx.fillStyle = "#cbd5e1";
+  ctx.font = "15px sans-serif";
+  ctx.fillText("60 秒內接住螢幕上方指定的特餐便當！", cx, top + 38);
 
+  // Rule rows
+  const rules: [string, string][] = [
+    ["✅ 接對特餐", "+25 分"],
+    ["❌ 接錯食物", "-10 分，變胖速度變慢"],
+    ["📞 工作來電", "需接聽（Z / 點綠色按鈕）"],
+    ["🚨 詐騙來電", "需掛斷（X / 點紅色按鈕）"],
+    ["😱 接錯電話", "被耽誤 2 秒，無法移動"],
+  ];
+
+  const rowH = 24;
+  const rulesTop = top + 68;
+  rules.forEach(([label, desc], i) => {
+    const y = rulesTop + i * rowH;
+    ctx.font = "bold 13px sans-serif";
+    ctx.fillStyle = "#f0c040";
+    ctx.textAlign = "right";
+    ctx.fillText(label, cx - 4, y);
+    ctx.font = "13px sans-serif";
+    ctx.fillStyle = "#e2e8f0";
+    ctx.textAlign = "left";
+    ctx.fillText(desc, cx + 6, y);
+  });
+
+  // Start prompt
+  ctx.textAlign = "center";
   ctx.fillStyle = "#4ade80";
-  ctx.font = "bold 22px sans-serif";
-  ctx.fillText("點擊畫面 / 按鈕開始遊戲", CW / 2, CH / 2 + 16);
-
-  // Legend
-  ctx.font = "14px sans-serif";
-  ctx.fillStyle = "#aaa";
-  ctx.fillText("綠色方塊 = +10  |  紅色星爆 = -15", CW / 2, CH / 2 + 54);
-  ctx.fillText("老闆來電 → 接聽(+20)  |  詐騙 → 掛斷", CW / 2, CH / 2 + 76);
-  ctx.fillText("漏接老闆 / 誤接詐騙 → 定身 3 秒", CW / 2, CH / 2 + 98);
+  ctx.font = "bold 20px sans-serif";
+  ctx.fillText("點擊畫面開始遊戲", cx, rulesTop + rules.length * rowH + 28);
 }
 
 function drawGameOver(
@@ -468,7 +399,200 @@ function initState(hiScore = 0, character: CharacterId = "bento"): GameState {
       .slice(0, 2),
     fat: false,
     fatUntil: 0,
+    combo: 0,
+    maxCombo: 0,
   };
+}
+
+// ─── Phone call overlay (must be outside GameCanvas to keep stable identity) ──
+interface CallOverlayProps {
+  call: PhoneCall;
+  portrait: boolean;
+  onAnswer: (id: number) => void;
+  onDecline: (id: number) => void;
+}
+
+function CallOverlay({ call, portrait, onAnswer, onDecline }: CallOverlayProps) {
+  const [timeLeft, setTimeLeft] = useState(CALL_TIMEOUT_MS);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const remaining = CALL_TIMEOUT_MS - (performance.now() - call.spawnTime);
+      setTimeLeft(Math.max(0, remaining));
+    }, 100);
+    return () => clearInterval(interval);
+  }, [call.spawnTime]);
+
+  const isLegit = call.type === "legit";
+  const isLeft = call.side === "left";
+  const pct = timeLeft / CALL_TIMEOUT_MS;
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: "50%",
+        ...(isLeft ? { left: 8 } : { right: 8 }),
+        transform: "translateY(-50%)",
+        width: portrait ? 142 : 130,
+        background: "#111827",
+        borderRadius: 22,
+        border: "3px solid #374151",
+        boxShadow: "0 8px 32px rgba(0,0,0,0.85)",
+        overflow: "hidden",
+        fontFamily: "sans-serif",
+        zIndex: 20,
+        userSelect: "none",
+        animation: "phoneSlideIn 0.3s ease-out",
+      }}
+    >
+      {/* Countdown bar at top of phone */}
+      <div style={{ height: 4, background: "#1f2937" }}>
+        <div
+          style={{
+            height: "100%",
+            width: `${pct * 100}%`,
+            background:
+              pct > 0.6 ? "#22c55e" : pct > 0.3 ? "#f59e0b" : "#ef4444",
+            transition: "width 0.1s linear, background 0.5s",
+          }}
+        />
+      </div>
+
+      {/* Phone screen */}
+      <div
+        style={{
+          padding: "12px 12px 10px",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          background: isLegit
+            ? "linear-gradient(180deg,#0f172a 0%,#1e3a5f 80%)"
+            : "linear-gradient(180deg,#0f172a 0%,#3f0f0f 80%)",
+        }}
+      >
+        {/* Caller avatar */}
+        <div
+          style={{
+            width: 52,
+            height: 52,
+            borderRadius: "50%",
+            background: isLegit
+              ? "linear-gradient(135deg,#1e40af,#3b82f6)"
+              : "linear-gradient(135deg,#991b1b,#ef4444)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 24,
+            marginBottom: 6,
+            border: `2px solid ${isLegit ? "#60a5fa" : "#f87171"}`,
+            boxShadow: `0 0 14px ${isLegit ? "rgba(59,130,246,0.6)" : "rgba(239,68,68,0.6)"}`,
+            animation: "phonePulse 1s ease-in-out infinite",
+          }}
+        >
+          {isLegit ? "👔" : "🚨"}
+        </div>
+
+        <div
+          style={{
+            fontSize: 9,
+            color: isLegit ? "#93c5fd" : "#fca5a5",
+            letterSpacing: 1,
+            marginBottom: 3,
+            textTransform: "uppercase" as const,
+          }}
+        >
+          {isLegit ? "來電中..." : "⚠ 疑似詐騙"}
+        </div>
+
+        <div
+          style={{
+            fontSize: 14,
+            fontWeight: 700,
+            color: "#fff",
+            textAlign: "center",
+            marginBottom: 2,
+          }}
+        >
+          {call.caller}
+        </div>
+
+        <div
+          style={{
+            fontSize: 9,
+            color: "#9ca3af",
+            textAlign: "center",
+            marginBottom: 6,
+          }}
+        >
+          {call.sub}
+        </div>
+
+        <div
+          style={{
+            fontSize: 9,
+            color: isLegit ? "#fbbf24" : "#f87171",
+            fontWeight: 700,
+            marginBottom: 10,
+          }}
+        >
+          {isLegit ? "⚠️ 必須接聽！" : "⚠️ 必須掛斷！"}
+        </div>
+
+        {/* Decline left, Accept right */}
+        <div style={{ display: "flex", gap: 18, marginBottom: 4 }}>
+          <button
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              onDecline(call.id);
+            }}
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: "50%",
+              background: "linear-gradient(135deg,#dc2626,#ef4444)",
+              border: "2px solid #fecaca",
+              boxShadow: "0 4px 12px rgba(239,68,68,0.5)",
+              cursor: "pointer",
+              touchAction: "manipulation",
+              fontSize: 20,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            📵
+          </button>
+          <button
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              onAnswer(call.id);
+            }}
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: "50%",
+              background: "linear-gradient(135deg,#16a34a,#22c55e)",
+              border: "2px solid #bbf7d0",
+              boxShadow: "0 4px 12px rgba(34,197,94,0.5)",
+              cursor: "pointer",
+              touchAction: "manipulation",
+              fontSize: 20,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            📞
+          </button>
+        </div>
+
+        <div style={{ fontSize: 9, color: "#6b7280" }}>
+          {(timeLeft / 1000).toFixed(1)}s
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -485,9 +609,9 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
 
   // React state — only for HTML overlays (phone calls), status & orientation
   const [calls, setCalls] = useState<PhoneCall[]>([]);
-  const [gameStatus, setGameStatus] = useState<
-    "idle" | "playing" | "gameover"
-  >("idle");
+  const [gameStatus, setGameStatus] = useState<"idle" | "playing" | "gameover">(
+    "idle",
+  );
   const [portrait, setPortrait] = useState<boolean>(isPortraitViewport);
   const [vpW, setVpW] = useState(() =>
     typeof window !== "undefined" ? window.innerWidth : 390,
@@ -495,6 +619,13 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
   const [vpH, setVpH] = useState(() =>
     typeof window !== "undefined" ? window.innerHeight : 700,
   );
+  const [scoreDisplay, setScoreDisplay] = useState(0);
+  const [timeLeftDisplay, setTimeLeftDisplay] = useState(GAME_DURATION_MS);
+  const [comboDisplay, setComboDisplay] = useState(0);
+  const [maxComboDisplay, setMaxComboDisplay] = useState(0);
+  const [fatDisplay, setFatDisplay] = useState(false);
+  const [fatUntilDisplay, setFatUntilDisplay] = useState(0);
+  const [dailySpecialDisplay, setDailySpecialDisplay] = useState<string[]>([]);
 
   // ── Preload meal images ────────────────────────────────────────────────────
   // ── Start / restart game ───────────────────────────────────────────────────
@@ -576,7 +707,13 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
     if (gs.fat && now >= gs.fatUntil) gs.fat = false;
 
     // Move player (if not frozen)
-    const speed = gs.fat ? Math.round(PLAYER_SPEED * 0.35) : PLAYER_SPEED;
+    const comboSpeedBonus = Math.min(
+      Math.floor(gs.combo / 3) * 0.5,
+      PLAYER_SPEED,
+    );
+    const speed = gs.fat
+      ? Math.round(PLAYER_SPEED * 0.35)
+      : Math.min(PLAYER_SPEED + comboSpeedBonus, PLAYER_SPEED * 2);
     if (!gs.frozen) {
       if (moveDirRef.current !== 0) {
         gs.playerX += moveDirRef.current * speed;
@@ -599,7 +736,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
         x: rng(8, CW - ITEM_SIZE - 8),
         y: -ITEM_SIZE,
         mealFile: pick(MEAL_FILES),
-        speed: 1.8 + Math.random() * 1.2 + gs.elapsed * 0.0001,
+        speed: 1.3 + Math.random() * 0.9 + gs.elapsed * 0.0001,
       });
     }
 
@@ -632,17 +769,21 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
             gs.comboCount++;
             if (gs.comboCount >= 3) gs.comboActive = true;
           }
+          gs.combo++;
+          if (gs.combo > gs.maxCombo) gs.maxCombo = gs.combo;
         } else {
-          // Wrong meal — fat & slow 3s (shield can block)
+          // Wrong meal — deduct 10 pts, fat & slow (shield can block)
           if (gs.character === "shield" && gs.shields > 0) {
             gs.shields--;
           } else {
+            gs.score -= 10;
             gs.fat = true;
             gs.fatUntil = now + FAT_DURATION_MS;
             if (gs.character === "bento") {
               gs.comboCount = 0;
               gs.comboActive = false;
             }
+            gs.combo = 0;
           }
         }
         if (gs.score > gs.hiScore) gs.hiScore = gs.score;
@@ -746,9 +887,6 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
         );
       }
 
-      // HUD
-      drawHUD(ctx, gs, now);
-
       // Freeze overlay
       if (gs.frozen) {
         drawFreezeOverlay(ctx, gs.frozenMsg, gs.frozenUntil, now);
@@ -768,6 +906,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
     const ctx = canvas.getContext("2d")!;
 
     let statusSent = gsRef.current.status;
+    let lastHudSync = 0;
 
     const loop = (now: number) => {
       const gs = gsRef.current;
@@ -791,6 +930,18 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
         // until the player taps to restart
         if (gs.status !== "gameover") setGameStatus(gs.status);
         if (gs.status === "gameover") setCalls([]);
+      }
+
+      // Sync HUD display every ~100ms to avoid excessive re-renders
+      if (now - lastHudSync > 100) {
+        lastHudSync = now;
+        setScoreDisplay(gs.score);
+        setTimeLeftDisplay(gs.timeLeft);
+        setComboDisplay(gs.combo);
+        setMaxComboDisplay(gs.maxCombo);
+        setFatDisplay(gs.fat);
+        setFatUntilDisplay(gs.fatUntil);
+        setDailySpecialDisplay(gs.dailySpecial);
       }
 
       rafRef.current = requestAnimationFrame(loop);
@@ -875,158 +1026,32 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
     [startGame],
   );
 
-  // ── Call countdown helper ─────────────────────────────────────────────────
-  const CallOverlay = ({ call }: { call: PhoneCall }) => {
-    const [timeLeft, setTimeLeft] = useState(CALL_TIMEOUT_MS);
-
-    useEffect(() => {
-      const interval = setInterval(() => {
-        const remaining =
-          CALL_TIMEOUT_MS - (performance.now() - call.spawnTime);
-        setTimeLeft(Math.max(0, remaining));
-      }, 100);
-      return () => clearInterval(interval);
-    }, [call.spawnTime]);
-
-    const isLeft = call.side === "left";
-    const isLegit = call.type === "legit";
-    const pct = timeLeft / CALL_TIMEOUT_MS;
-
-    const cardW = portrait ? 180 : 168;
-    const fBase = portrait ? 14 : 11;
-    const fTitle = portrait ? 17 : 15;
-    const fSub = portrait ? 14 : 12;
-
-    return (
-      <div
-        style={{
-          position: "absolute",
-          top: "10%",
-          ...(isLeft ? { left: 0 } : { right: 0 }),
-          width: cardW,
-          background: isLegit
-            ? "linear-gradient(135deg,#1e3a5f,#2a5298)"
-            : "linear-gradient(135deg,#5f1e1e,#982a2a)",
-          borderRadius: isLeft ? "0 16px 16px 0" : "16px 0 0 16px",
-          padding: "12px 10px 10px",
-          boxShadow: isLegit
-            ? "0 4px 24px rgba(42,82,152,0.7)"
-            : "0 4px 24px rgba(152,42,42,0.7)",
-          color: "#fff",
-          fontFamily: "sans-serif",
-          zIndex: 20,
-          userSelect: "none",
-          border: `2px solid ${isLegit ? "#4a90e2" : "#e74c3c"}`,
-          animation: "slideIn 0.25s ease-out",
-        }}
-      >
-        {/* Caller info */}
-        <div style={{ fontSize: fBase, opacity: 0.7, marginBottom: 2 }}>
-          {isLegit ? "📞 來電" : "⚠️ 疑似詐騙"}
-        </div>
-        <div style={{ fontSize: fTitle, fontWeight: 700, lineHeight: 1.3 }}>
-          {call.caller}
-        </div>
-        <div style={{ fontSize: fSub, opacity: 0.85, marginTop: 2 }}>
-          {call.sub}
-        </div>
-
-        {/* Countdown bar */}
-        <div
-          style={{
-            height: 4,
-            background: "rgba(255,255,255,0.2)",
-            borderRadius: 2,
-            marginTop: 8,
-            overflow: "hidden",
-          }}
-        >
-          <div
-            style={{
-              height: "100%",
-              width: `${pct * 100}%`,
-              background:
-                pct > 0.5 ? "#4ade80" : pct > 0.25 ? "#f0c040" : "#f87171",
-              transition: "width 0.1s linear",
-            }}
-          />
-        </div>
-        <div
-          style={{
-            fontSize: fBase,
-            textAlign: "right",
-            marginTop: 2,
-            opacity: 0.7,
-          }}
-        >
-          {(timeLeft / 1000).toFixed(1)}s
-        </div>
-
-        {/* Buttons */}
-        <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-          <button
-            onPointerDown={(e) => {
-              e.stopPropagation();
-              handleAnswer(call.id);
-            }}
-            style={{
-              flex: 1,
-              padding: portrait ? "9px 4px" : "7px 4px",
-              background: "#22c55e",
-              color: "#fff",
-              border: "none",
-              borderRadius: 8,
-              fontWeight: 700,
-              fontSize: portrait ? 15 : 13,
-              cursor: "pointer",
-              touchAction: "manipulation",
-            }}
-          >
-            📞 接聽
-          </button>
-          <button
-            onPointerDown={(e) => {
-              e.stopPropagation();
-              handleDecline(call.id);
-            }}
-            style={{
-              flex: 1,
-              padding: "7px 4px",
-              background: "#ef4444",
-              color: "#fff",
-              border: "none",
-              borderRadius: 8,
-              fontWeight: 700,
-              fontSize: portrait ? 15 : 13,
-              cursor: "pointer",
-              touchAction: "manipulation",
-            }}
-          >
-            ❌ 掛斷
-          </button>
-        </div>
-
-        {/* Hint */}
-        <div
-          style={{
-            marginTop: 6,
-            fontSize: fBase,
-            textAlign: "center",
-            color: isLegit ? "#93c5fd" : "#fca5a5",
-            fontWeight: 600,
-          }}
-        >
-          {isLegit ? "⚠️ 必須接聽！" : "⚠️ 必須掛斷！"}
-        </div>
-      </div>
-    );
-  };
-
   // ── Render ─────────────────────────────────────────────────────────────────
   const logicalW = portrait ? 390 : 720;
   const logicalH = portrait ? 700 : 480;
-  // Scale to fill the viewport while keeping aspect ratio
   const cssScale = Math.min(vpW / logicalW, vpH / logicalH);
+
+  const panelBase: React.CSSProperties = {
+    background: "rgba(5,15,40,0.92)",
+    border: "2px solid #1e3a6e",
+    borderRadius: 8,
+    fontFamily: '"Courier New", Courier, monospace',
+    boxShadow:
+      "0 4px 16px rgba(0,0,0,0.7), inset 0 1px 0 rgba(100,160,255,0.08)",
+    color: "#fff",
+  };
+
+  const sec = Math.ceil(timeLeftDisplay / 1000);
+  const timeStr = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+  const missionPct = Math.min(Math.max(scoreDisplay, 0) / MISSION_TARGET, 1);
+  const comboColor =
+    comboDisplay < 5
+      ? "#22c55e"
+      : comboDisplay < 10
+        ? "#3b82f6"
+        : comboDisplay < 20
+          ? "#a855f7"
+          : "#f59e0b";
 
   return (
     <div
@@ -1037,10 +1062,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
         overflow: "hidden",
       }}
     >
-      {/* Background art — a real <img> at native resolution, sized to the actual
-          viewport width (not the logical/scaled canvas), so it stays crisp instead
-          of being rasterized into the small canvas buffer and stretched blurry.
-          Same letterbox treatment as the lobby: full width, black bars for the rest. */}
+      {/* Background */}
       <img
         src={game1BgSrc}
         alt=""
@@ -1056,23 +1078,35 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
       />
 
       <style>{`
-        @keyframes slideIn {
-          from { transform: translateX(var(--slide-x, -100%)); opacity: 0; }
-          to   { transform: translateX(0); opacity: 1; }
-        }
         @keyframes screenShake {
-          0%   { transform: translate(0,    0);   }
-          15%  { transform: translate(-4px, 3px); }
-          30%  { transform: translate(4px, -3px); }
+          0%   { transform: translate(0,0); }
+          15%  { transform: translate(-4px,3px); }
+          30%  { transform: translate(4px,-3px); }
           45%  { transform: translate(-3px,-4px); }
-          60%  { transform: translate(3px,  4px); }
-          75%  { transform: translate(-4px, 2px); }
-          90%  { transform: translate(4px, -2px); }
-          100% { transform: translate(0,    0);   }
+          60%  { transform: translate(3px,4px); }
+          75%  { transform: translate(-4px,2px); }
+          90%  { transform: translate(4px,-2px); }
+          100% { transform: translate(0,0); }
+        }
+        @keyframes phoneSlideIn {
+          from { opacity: 0; transform: translateY(-50%) scale(0.85); }
+          to   { opacity: 1; transform: translateY(-50%) scale(1); }
+        }
+        @keyframes phonePulse {
+          0%,100% { box-shadow: 0 0 14px rgba(59,130,246,0.6); }
+          50%     { box-shadow: 0 0 28px rgba(59,130,246,1); }
+        }
+        @keyframes comboPulse {
+          0%,100% { transform: scale(1); }
+          50%     { transform: scale(1.18); }
+        }
+        @keyframes blink {
+          0%,100% { opacity: 1; }
+          50%     { opacity: 0.4; }
         }
       `}</style>
 
-      {/* Shake wrapper — translates the whole viewport when a call is active */}
+      {/* Shake wrapper */}
       <div
         style={{
           position: "absolute",
@@ -1080,7 +1114,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
           animation: calls.length > 0 ? "screenShake 0.08s infinite" : "none",
         }}
       >
-        {/* Inner game area — sized in logical px, scaled up via CSS transform */}
+        {/* Inner game area */}
         <div
           style={{
             position: "absolute",
@@ -1106,7 +1140,500 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
             onPointerDown={onCanvasPointerDown}
           />
 
-          {/* Back button — hidden mid-play so it doesn't overlap the HUD */}
+          {/* ═══════════════ HUD OVERLAY (playing only) */}
+          {gameStatus === "playing" && (
+            <>
+              {/* ── TOP LEFT: SCORE + TIME ─────────── */}
+              <div
+                style={{
+                  position: "absolute",
+                  top: 8,
+                  left: 8,
+                  display: "flex",
+                  gap: 6,
+                  zIndex: 40,
+                }}
+              >
+                <div
+                  style={{
+                    ...panelBase,
+                    padding: "4px 10px 5px",
+                    minWidth: portrait ? 96 : 108,
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 9,
+                      color: "#f0c040",
+                      letterSpacing: 2,
+                      fontWeight: 700,
+                      marginBottom: 1,
+                    }}
+                  >
+                    SCORE
+                  </div>
+                  <div
+                    style={{
+                      fontSize: portrait ? 20 : 22,
+                      fontWeight: 700,
+                      color: "#f0c040",
+                      letterSpacing: 1,
+                    }}
+                  >
+                    {String(Math.max(0, scoreDisplay)).padStart(5, "0")}
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    ...panelBase,
+                    padding: "4px 10px 5px",
+                    minWidth: portrait ? 78 : 88,
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 9,
+                      color: "#aad4ff",
+                      letterSpacing: 2,
+                      fontWeight: 700,
+                      marginBottom: 1,
+                    }}
+                  >
+                    TIME
+                  </div>
+                  <div
+                    style={{
+                      fontSize: portrait ? 20 : 22,
+                      fontWeight: 700,
+                      color: timeLeftDisplay < 10000 ? "#f87171" : "#fff",
+                      letterSpacing: 1,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 4,
+                      animation:
+                        timeLeftDisplay < 10000
+                          ? "blink 0.8s infinite"
+                          : "none",
+                    }}
+                  >
+                    <span style={{ fontSize: 13 }}>⏱</span>
+                    {Math.ceil(timeLeftDisplay / 1000)}
+                  </div>
+                </div>
+              </div>
+
+              {/* ── TOP CENTER: 今日特餐 ───────────── */}
+              <div
+                style={{
+                  position: "absolute",
+                  top: 8,
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  zIndex: 40,
+                  ...panelBase,
+                  padding: "4px 12px 5px",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 9,
+                    color: "#f0c040",
+                    letterSpacing: 2,
+                    fontWeight: 700,
+                    marginBottom: 3,
+                  }}
+                >
+                  NEXT
+                </div>
+                <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
+                  {dailySpecialDisplay.map((sf) => {
+                    const img = IMG_CACHE.get(sf);
+                    return img ? (
+                      <div
+                        key={sf}
+                        style={{
+                          width: 34,
+                          height: 34,
+                          borderRadius: 6,
+                          border: "2px solid #f0c040",
+                          background: "rgba(240,192,64,0.12)",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          overflow: "hidden",
+                        }}
+                      >
+                        <img
+                          src={img.src}
+                          alt=""
+                          style={{
+                            width: 28,
+                            height: 28,
+                            imageRendering: "pixelated",
+                          }}
+                        />
+                      </div>
+                    ) : null;
+                  })}
+                </div>
+              </div>
+
+              {/* ── TOP RIGHT: MISSION + back button ── */}
+              <div
+                style={{
+                  position: "absolute",
+                  top: 8,
+                  right: 8,
+                  display: "flex",
+                  gap: 6,
+                  alignItems: "flex-start",
+                  zIndex: 40,
+                }}
+              >
+                <div
+                  style={{
+                    ...panelBase,
+                    padding: "4px 10px 6px",
+                    width: portrait ? 148 : 168,
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 9,
+                      color: "#f0c040",
+                      letterSpacing: 2,
+                      fontWeight: 700,
+                      marginBottom: 2,
+                    }}
+                  >
+                    MISSION
+                  </div>
+                  <div
+                    style={{
+                      fontSize: portrait ? 9 : 10,
+                      color: "#e2e8f0",
+                      marginBottom: 5,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    下班前達到 {MISSION_TARGET} 分！
+                  </div>
+                  <div
+                    style={{
+                      height: 8,
+                      background: "rgba(255,255,255,0.1)",
+                      borderRadius: 4,
+                      overflow: "hidden",
+                      marginBottom: 3,
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        width: `${missionPct * 100}%`,
+                        background:
+                          missionPct >= 1
+                            ? "#4ade80"
+                            : "linear-gradient(90deg,#f0c040,#fbbf24)",
+                        borderRadius: 4,
+                        transition: "width 0.4s ease",
+                      }}
+                    />
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 9,
+                      color: "#9ca3af",
+                      textAlign: "right",
+                    }}
+                  >
+                    {Math.max(0, scoreDisplay)}/{MISSION_TARGET}
+                  </div>
+                </div>
+
+                <button
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    onBack();
+                  }}
+                  style={{
+                    width: 42,
+                    height: 42,
+                    background: "linear-gradient(135deg,#1e3a8a,#2563eb)",
+                    border: "2px solid #60a5fa",
+                    borderRadius: 8,
+                    color: "#fff",
+                    fontSize: 16,
+                    cursor: "pointer",
+                    touchAction: "manipulation",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    boxShadow: "0 4px 12px rgba(37,99,235,0.5)",
+                    flexShrink: 0,
+                  }}
+                >
+                  ▐▐
+                </button>
+              </div>
+
+              {/* ── BOTTOM ROW: COMBO | D-pad | STATUS ─ */}
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: 8,
+                  left: 8,
+                  right: 8,
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "flex-end",
+                  zIndex: 30,
+                  pointerEvents: "none",
+                }}
+              >
+                {/* COMBO */}
+                <div
+                  style={{
+                    ...panelBase,
+                    padding: "6px 10px 8px",
+                    width: portrait ? 92 : 108,
+                    pointerEvents: "auto",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 9,
+                      color: "#f0c040",
+                      letterSpacing: 2,
+                      fontWeight: 700,
+                      marginBottom: 2,
+                    }}
+                  >
+                    COMBO
+                  </div>
+                  <div
+                    style={{
+                      color: comboDisplay === 0 ? "#6b7280" : comboColor,
+                      fontSize: portrait ? 24 : 28,
+                      fontWeight: 700,
+                      letterSpacing: 1,
+                      lineHeight: 1,
+                      marginBottom: 4,
+                      display: "inline-block",
+                      animation:
+                        comboDisplay > 0
+                          ? "comboPulse 0.4s ease-in-out"
+                          : "none",
+                    }}
+                  >
+                    {String(comboDisplay).padStart(2, " ")}
+                  </div>
+                  <div
+                    style={{
+                      height: 5,
+                      borderRadius: 3,
+                      background: "rgba(255,255,255,0.1)",
+                      overflow: "hidden",
+                      marginBottom: 3,
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        width: `${Math.min((comboDisplay / 30) * 100, 100)}%`,
+                        background:
+                          "linear-gradient(90deg,#22c55e,#3b82f6,#a855f7,#f59e0b)",
+                        borderRadius: 3,
+                        transition: "width 0.2s ease",
+                      }}
+                    />
+                  </div>
+                  <div style={{ fontSize: 9, color: "#6b7280" }}>
+                    最高 {maxComboDisplay}
+                  </div>
+                </div>
+
+                {/* D-pad */}
+                <div
+                  style={{
+                    display: "flex",
+                    gap: portrait ? 10 : 12,
+                    pointerEvents: "auto",
+                  }}
+                >
+                  {([-1, 1] as const).map((dir) => (
+                    <button
+                      key={dir}
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        btnActiveRef.current = true;
+                        moveDirRef.current = dir;
+                      }}
+                      onPointerUp={(e) => {
+                        e.stopPropagation();
+                        btnActiveRef.current = false;
+                        moveDirRef.current = 0;
+                      }}
+                      onPointerLeave={(e) => {
+                        e.stopPropagation();
+                        btnActiveRef.current = false;
+                        moveDirRef.current = 0;
+                      }}
+                      onPointerCancel={(e) => {
+                        e.stopPropagation();
+                        btnActiveRef.current = false;
+                        moveDirRef.current = 0;
+                      }}
+                      style={{
+                        width: portrait ? 76 : 72,
+                        height: portrait ? 76 : 72,
+                        background: "linear-gradient(135deg,#1e3a8a,#2563eb)",
+                        border: "3px solid rgba(147,197,253,0.7)",
+                        borderRadius: 14,
+                        color: "#fff",
+                        fontSize: 26,
+                        fontWeight: 700,
+                        cursor: "pointer",
+                        touchAction: "none",
+                        userSelect: "none",
+                        boxShadow:
+                          "0 4px 14px rgba(37,99,235,0.5), inset 0 1px 0 rgba(255,255,255,0.15)",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      {dir === -1 ? "←" : "→"}
+                    </button>
+                  ))}
+                </div>
+
+                {/* STATUS */}
+                <div
+                  style={{
+                    ...panelBase,
+                    padding: "6px 10px 8px",
+                    width: portrait ? 128 : 150,
+                    pointerEvents: "auto",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 9,
+                      color: "#f0c040",
+                      letterSpacing: 2,
+                      fontWeight: 700,
+                      marginBottom: 5,
+                    }}
+                  >
+                    STATUS
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      marginBottom: 7,
+                    }}
+                  >
+                    <span style={{ fontSize: 18 }}>
+                      {fatDisplay ? "🤢" : "😊"}
+                    </span>
+                    <div style={{ flex: 1 }}>
+                      <div
+                        style={{
+                          fontSize: 9,
+                          color: "#cbd5e1",
+                          marginBottom: 2,
+                        }}
+                      >
+                        體重
+                      </div>
+                      <div
+                        style={{
+                          height: 6,
+                          background: "rgba(255,255,255,0.1)",
+                          borderRadius: 3,
+                          overflow: "hidden",
+                        }}
+                      >
+                        <div
+                          style={{
+                            height: "100%",
+                            width: fatDisplay
+                              ? `${Math.min(Math.max(0, (fatUntilDisplay - performance.now()) / FAT_DURATION_MS) * 100, 100)}%`
+                              : "28%",
+                            background: fatDisplay ? "#ef4444" : "#22c55e",
+                            borderRadius: 3,
+                            transition: "background 0.5s",
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <div
+                      style={{
+                        background: "rgba(30,60,130,0.7)",
+                        borderRadius: 5,
+                        padding: "2px 6px",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 4,
+                      }}
+                    >
+                      <span style={{ fontSize: 10 }}>⏱</span>
+                      <span
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 700,
+                          color:
+                            timeLeftDisplay < 10000 ? "#f87171" : "#f0c040",
+                        }}
+                      >
+                        {timeStr}
+                      </span>
+                    </div>
+                    {fatDisplay && (
+                      <div
+                        style={{
+                          fontSize: 9,
+                          color: "#f87171",
+                          fontWeight: 700,
+                          animation: "blink 0.6s infinite",
+                        }}
+                      >
+                        反轉中
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Phone call overlays */}
+              {calls.map((call) => (
+                <CallOverlay
+                  key={call.id}
+                  call={call}
+                  portrait={portrait}
+                  onAnswer={handleAnswer}
+                  onDecline={handleDecline}
+                />
+              ))}
+            </>
+          )}
+
+          {/* Back button — idle / gameover */}
           {gameStatus !== "playing" && (
             <button
               onPointerDown={(e) => {
@@ -1131,70 +1658,6 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
             >
               ← 返回
             </button>
-          )}
-
-          {/* Phone call overlays */}
-          {gameStatus === "playing" &&
-            calls.map((call) => <CallOverlay key={call.id} call={call} />)}
-
-
-          {/* D-pad buttons */}
-          {gameStatus === "playing" && (
-            <div
-              style={{
-                position: "absolute",
-                bottom: 14,
-                left: 14,
-                display: "flex",
-                gap: 10,
-                zIndex: 30,
-              }}
-            >
-              {(["←", "→"] as const).map((label, i) => (
-                <button
-                  key={label}
-                  onPointerDown={(e) => {
-                    e.stopPropagation();
-                    btnActiveRef.current = true;
-                    moveDirRef.current = i === 0 ? -1 : 1;
-                  }}
-                  onPointerUp={(e) => {
-                    e.stopPropagation();
-                    btnActiveRef.current = false;
-                    moveDirRef.current = 0;
-                  }}
-                  onPointerLeave={(e) => {
-                    e.stopPropagation();
-                    btnActiveRef.current = false;
-                    moveDirRef.current = 0;
-                  }}
-                  onPointerCancel={(e) => {
-                    e.stopPropagation();
-                    btnActiveRef.current = false;
-                    moveDirRef.current = 0;
-                  }}
-                  style={{
-                    width: 72,
-                    height: 72,
-                    background: "rgba(20,50,110,0.82)",
-                    border: "2px solid rgba(120,190,255,0.75)",
-                    borderRadius: 12,
-                    color: "#fff",
-                    fontSize: 30,
-                    fontWeight: 700,
-                    cursor: "pointer",
-                    touchAction: "none",
-                    userSelect: "none",
-                    boxShadow: "0 3px 10px rgba(0,0,0,0.5)",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
           )}
         </div>
       </div>
