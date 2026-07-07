@@ -5,6 +5,7 @@ import stage2 from './assets/stage_2.png'
 import stage3 from './assets/stage_3.png'
 import stage4 from './assets/stage_4.png'
 import mascot from './assets/mascot.png'
+import startGif from './assets/Start.gif'
 import { LEVELS, LevelDef, getStars } from './gameData'
 import { loadHistory, getBestForLevel, PlayRecord } from './leaderboard'
 import { loadProfile, saveProfile, getLevelInfo } from './player'
@@ -105,14 +106,17 @@ export default function Lobby({ onPlay }: LobbyProps) {
   const vh = typeof window !== 'undefined' ? window.innerHeight : 480
   const scale = Math.min(1.6, Math.max(0.7, Math.min(vw, vh) / 480))
 
-  // home_bg.png is 1672x941. It's rendered zoomed-in and centered (both axes) over
-  // the viewport, so its on-screen box depends on viewport size/aspect — computing
-  // that box here (instead of hardcoding %) is what keeps the level nodes glued to
-  // the four circles in the art no matter how the window is resized.
+  // home_bg.png is 1672x941, "contain"-fit: scaled to the largest size where
+  // BOTH dimensions still fit inside the viewport, so neither one is ever
+  // cropped — leftover space on whichever axis (top/bottom on tall screens,
+  // left/right on short/wide ones) is just the container's black background.
+  // Computing its on-screen box here (instead of hardcoding %) is what keeps
+  // the level nodes glued to the four circles in the art no matter how the
+  // window is resized.
   const IMG_ASPECT = 941 / 1672
-  const IMG_ZOOM = 1.12
-  const imgW = vw * IMG_ZOOM
-  const imgH = imgW * IMG_ASPECT
+  let imgW = vw
+  let imgH = imgW * IMG_ASPECT
+  if (imgH > vh) { imgH = vh; imgW = imgH / IMG_ASPECT }
   const imgLeft = (vw - imgW) / 2
   const imgTop = (vh - imgH) / 2
 
@@ -132,9 +136,9 @@ export default function Lobby({ onPlay }: LobbyProps) {
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden', fontFamily: 'sans-serif', background: '#000' }}>
 
-      {/* Background image — zoomed in slightly and centered on both axes so the
-          four circles it depicts line up with the level nodes below at any
-          viewport size (see imgW/imgH/imgLeft/imgTop above). */}
+      {/* Background image — "contain"-fit and centered on both axes; any
+          leftover space is the container's black background (see
+          imgW/imgH/imgLeft/imgTop above). */}
       <img
         src={homeBg}
         style={{
@@ -145,14 +149,23 @@ export default function Lobby({ onPlay }: LobbyProps) {
         alt=""
       />
 
+      {/* Decorative start gif — centered over the plaza in the middle of the board */}
+      <img
+        src={startGif}
+        alt=""
+        draggable={false}
+        style={{
+          position: 'absolute', left: '50%', top: '50%',
+          transform: 'translate(-50%,-50%)',
+          width: Math.round(150 * scale),
+          pointerEvents: 'none', zIndex: 1,
+        }}
+      />
+
       <style>{`
         @keyframes levelGlowPulse {
           0%, 100% { opacity: 1;   transform: scale(1);    }
           50%      { opacity: 0.75; transform: scale(1.14); }
-        }
-        @keyframes levelRingPulse {
-          0%, 100% { opacity: 1;   transform: translate(-50%,-50%) scale(1);    }
-          50%      { opacity: 0.6; transform: translate(-50%,-50%) scale(1.06); }
         }
       `}</style>
 
@@ -186,19 +199,6 @@ export default function Lobby({ onPlay }: LobbyProps) {
                 borderRadius: '50%',
                 background: 'radial-gradient(circle, rgba(255,214,0,0.9) 0%, rgba(255,193,7,0.5) 45%, rgba(255,193,7,0) 72%)',
                 animation: 'levelGlowPulse 1.1s ease-in-out infinite',
-                pointerEvents: 'none',
-              }} />
-            )}
-            {/* Crisp gold outline ring — the glow alone read as "weak"; a solid
-                ring around the stage art makes the selected node unmistakable. */}
-            {isSelected && (
-              <div style={{
-                position: 'absolute', left: '50%', top: '50%',
-                width: '104%', height: '104%',
-                borderRadius: '50%',
-                border: '4px solid #ffd700',
-                boxShadow: '0 0 14px 2px rgba(255,214,0,0.9)',
-                animation: 'levelRingPulse 1.1s ease-in-out infinite',
                 pointerEvents: 'none',
               }} />
             )}
@@ -244,9 +244,10 @@ export default function Lobby({ onPlay }: LobbyProps) {
         )
       })}
 
-      {/* Top gradient bar — player card + leaderboard */}
+      {/* Top gradient bar — player card + leaderboard. Sits above the level
+          nodes (zIndex 2) so it's never covered by them. */}
       <div style={{
-        position: 'absolute', top: 0, left: 0, right: 0,
+        position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10,
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: `${Math.round(10 * scale)}px ${Math.round(16 * scale)}px`,
         background: 'linear-gradient(180deg,rgba(0,0,0,0.7) 0%,rgba(0,0,0,0) 100%)',
@@ -346,9 +347,10 @@ export default function Lobby({ onPlay }: LobbyProps) {
         </div>
       </div>
 
-      {/* Bottom bar — goal card sits to the left of the start button, both in one row */}
+      {/* Bottom bar — goal card sits to the left of the start button, both in one
+          row. Sits above the level nodes (zIndex 2) so it's never covered by them. */}
       <div style={{
-        position: 'absolute', bottom: 0, left: 0, right: 0,
+        position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 10,
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: Math.round(10 * scale),
         padding: `${Math.round(10 * scale)}px ${Math.round(14 * scale)}px`,
         background: 'linear-gradient(0deg,rgba(0,0,0,0.8) 0%,rgba(0,0,0,0) 100%)',
@@ -418,8 +420,8 @@ export default function Lobby({ onPlay }: LobbyProps) {
           onPointerDown={() => setShowLeaderboard(false)}
           style={{
             position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.75)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            zIndex: 50, padding: 20,
+            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+            zIndex: 50, padding: '6% 20px 20px',
           }}
         >
           <div
@@ -519,7 +521,8 @@ export default function Lobby({ onPlay }: LobbyProps) {
                     )
                   }
                   const RANK_MEDAL = ['🥇', '🥈', '🥉']
-                  const rankFontSize = (i: number) => (i === 0 ? 32 : i === 1 ? 26 : i === 2 ? 22 : 17)
+                  const rankFontSize = (i: number) => (i === 0 ? 30 : i === 1 ? 25 : i === 2 ? 21 : 17)
+                  const scoreFontSize = (i: number) => (i === 0 ? 40 : i === 1 ? 32 : i === 2 ? 27 : 21)
                   const rankColor = (i: number) => (i === 0 ? '#ffd700' : i === 1 ? '#f2f5fb' : i === 2 ? '#e6a662' : '#dbe4f5')
                   return boardRows.map((r, i) => (
                     <div
@@ -536,7 +539,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
                           : <span style={{ color: '#aebbdb', fontWeight: 700, fontSize: 17 }}>{i + 1}</span>}
                       </div>
                       <div style={{ color: '#aebbdb', fontSize: 14, flex: 1 }}>{formatTs(r.ts)}</div>
-                      <div style={{ color: rankColor(i), fontWeight: 800, fontSize: rankFontSize(i), lineHeight: 1 }}>
+                      <div style={{ color: rankColor(i), fontWeight: 800, fontSize: scoreFontSize(i), lineHeight: 1 }}>
                         {r.score}
                       </div>
                     </div>
