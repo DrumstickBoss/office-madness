@@ -6,6 +6,15 @@ import stage3 from "./assets/stage_3.png";
 import stage4 from "./assets/stage_4.png";
 import mascot from "./assets/mascot.png";
 import startGif from "./assets/Start.gif";
+import rankingListBg from "./assets/rankinglist_alpha.png";
+import ranking1_1 from "./assets/ranking/ranking1-1.png";
+import ranking1_2 from "./assets/ranking/ranking1-2.png";
+import ranking2_1 from "./assets/ranking/ranking2-1.png";
+import ranking2_2 from "./assets/ranking/ranking2-2.png";
+import ranking3_1 from "./assets/ranking/ranking3-1.png";
+import ranking3_2 from "./assets/ranking/ranking3-2.png";
+import ranking4_1 from "./assets/ranking/ranking4-1.png";
+import ranking4_2 from "./assets/ranking/ranking4-2.png";
 import { LEVELS, LevelDef, getStars } from "./gameData";
 import { loadHistory, getBestForLevel, PlayRecord } from "./leaderboard";
 import { loadProfile, saveProfile, getLevelInfo } from "./player";
@@ -16,6 +25,14 @@ const STAGE_IMAGES: Record<number, string> = {
   2: stage2,
   3: stage3,
   4: stage4,
+};
+
+// Leaderboard tab art — one badge image per game, "-1" unselected / "-2" selected.
+const RANKING_TAB_IMAGES: Record<number, { off: string; on: string }> = {
+  1: { off: ranking1_1, on: ranking1_2 },
+  2: { off: ranking2_1, on: ranking2_2 },
+  3: { off: ranking3_1, on: ranking3_2 },
+  4: { off: ranking4_1, on: ranking4_2 },
 };
 
 // mascot.png is a 1024x1024 full-body render — this crop box (in source px)
@@ -133,15 +150,19 @@ export default function Lobby({ onPlay }: LobbyProps) {
 
   const vw = typeof window !== "undefined" ? window.innerWidth : 720;
   const vh = typeof window !== "undefined" ? window.innerHeight : 480;
+  // UI chrome (top/bottom bars, leaderboard modal) is anchored directly to the
+  // real viewport's own edges/box below, so by construction it can never
+  // exceed the screen — its internal sizing just uses this clamped scale
+  // factor to stay reasonably sized without needing any overflow math.
   const scale = Math.min(1.6, Math.max(0.7, Math.min(vw, vh) / 480));
 
   // home_bg.png is 1672x941, width-driven: always fills 100% of the viewport
   // width (matches Level 1's background), with height following from the
   // aspect ratio — cropped top/bottom by the container's overflow:hidden if
-  // it overflows, letterboxed in black if it doesn't fill the viewport.
-  // Computing its on-screen box here (instead of hardcoding %) is what keeps
-  // the level nodes glued to the four circles in the art no matter how the
-  // window is resized.
+  // it overflows, letterboxed in black if it doesn't fill the viewport. Only
+  // the background + level circles use this scale (so the circles stay glued
+  // to the art); the UI chrome above uses its own viewport-anchored scale
+  // instead so it's never affected by the background being cropped.
   const IMG_ASPECT = 941 / 1672;
   const imgW = vw;
   const imgH = imgW * IMG_ASPECT;
@@ -149,15 +170,23 @@ export default function Lobby({ onPlay }: LobbyProps) {
   const imgTop = (vh - imgH) / 2;
 
   // Node positions as fractions (0..1) of the background image, sampled directly
-  // from home_bg.png's four circles so they stay pinned to the art at any zoom/size.
+  // from home_bg.png's four circles so they stay pinned to the art at any size.
   const levelNodes: Array<{ level: LevelDef; fx: number; fy: number }> = [
     { level: LEVELS[0], fx: 0.313, fy: 0.696 }, // GREEN  bottom-left
     { level: LEVELS[1], fx: 0.301, fy: 0.318 }, // YELLOW upper-left
-    { level: LEVELS[2], fx: 0.678, fy: 0.31 }, // PURPLE upper-right
-    { level: LEVELS[3], fx: 0.696, fy: 0.697 }, // BLUE   bottom-right
+    { level: LEVELS[2], fx: 0.677, fy: 0.3 }, // PURPLE upper-right
+    { level: LEVELS[3], fx: 0.696, fy: 0.694 }, // BLUE   bottom-right
   ];
 
   const btnW = Math.round(Math.min(210, imgW * 0.16));
+
+  // rankinglist_alpha.png is 1308x1203 — the leaderboard panel is sized to
+  // that exact aspect ratio (no stretching), capped by BOTH a max width and a
+  // max height (in real viewport px) so it can never exceed the screen.
+  // Whichever cap is more restrictive wins.
+  const RANK_ASPECT = 1308 / 1203;
+  const rankModalW = Math.min(vw * 0.7, vh * 0.82 * RANK_ASPECT);
+  const rankAvatarSize = Math.round(rankModalW * 0.14);
 
   const canStart =
     selectedLevel != null &&
@@ -174,9 +203,9 @@ export default function Lobby({ onPlay }: LobbyProps) {
         background: "#000",
       }}
     >
-      {/* Background image — "contain"-fit and centered on both axes; any
-          leftover space is the container's black background (see
-          imgW/imgH/imgLeft/imgTop above). */}
+      {/* Background image — width always fills the viewport (matches Level 1);
+          height follows the aspect ratio and is cropped/letterboxed as needed.
+          The four circles line up with fx/fy fractions below at any size. */}
       <img
         src={homeBg}
         style={{
@@ -197,8 +226,8 @@ export default function Lobby({ onPlay }: LobbyProps) {
         draggable={false}
         style={{
           position: "absolute",
-          left: "51%",
-          top: "67%",
+          left: imgLeft + 0.51 * imgW,
+          top: imgTop + 0.67 * imgH,
           transform: "translate(-50%,-50%)",
           width: Math.round(150 * scale),
           pointerEvents: "none",
@@ -246,12 +275,12 @@ export default function Lobby({ onPlay }: LobbyProps) {
                   position: "absolute",
                   left: "50%",
                   top: "50%",
-                  width: "92%",
-                  height: "92%",
+                  width: "60%",
+                  height: "60%",
                   transform: "translate(-50%,-50%)",
                   borderRadius: "50%",
                   background:
-                    "radial-gradient(circle, rgba(255,214,0,0.9) 0%, rgba(255,193,7,0.5) 45%, rgba(255,193,7,0) 72%)",
+                    "radial-gradient(circle, rgba(255,214,0,0.9) 0%, rgba(255,193,7,0.5) 40%, rgba(255,193,7,0) 62%)",
                   animation: "levelGlowPulse 1.1s ease-in-out infinite",
                   pointerEvents: "none",
                 }}
@@ -267,7 +296,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
                 pointerEvents: "none",
                 position: "relative",
                 filter: isSelected
-                  ? "drop-shadow(0 0 10px #fff) drop-shadow(0 0 22px #ffd700) drop-shadow(0 0 42px #ffc107)"
+                  ? "drop-shadow(0 0 4px #fff) drop-shadow(0 0 9px #ffd700) drop-shadow(0 0 16px #ffc107)"
                   : "drop-shadow(0 3px 8px rgba(0,0,0,0.5))",
               }}
             />
@@ -321,8 +350,9 @@ export default function Lobby({ onPlay }: LobbyProps) {
         );
       })}
 
-      {/* Top gradient bar — player card + leaderboard. Sits above the level
-          nodes (zIndex 2) so it's never covered by them. */}
+      {/* Top gradient bar — player card + leaderboard. Anchored to the real
+          viewport's own top edge (not the background's box), so it's never
+          covered by the level nodes and can never exceed the screen. */}
       <div
         style={{
           position: "absolute",
@@ -521,7 +551,8 @@ export default function Lobby({ onPlay }: LobbyProps) {
       </div>
 
       {/* Bottom bar — goal card sits to the left of the start button, both in one
-          row. Sits above the level nodes (zIndex 2) so it's never covered by them. */}
+          row. Anchored to the real viewport's own bottom edge, same reasoning
+          as the top bar above. */}
       <div
         style={{
           position: "absolute",
@@ -640,9 +671,12 @@ export default function Lobby({ onPlay }: LobbyProps) {
         </button>
       </div>
 
-      {/* Leaderboard modal — every play is recorded in localStorage. Styled like a
-          mobile-game rankings panel (à la KartRider Rush+): a crown + mascot-head
-          badge straddles the top edge, dark gemstone-frame body underneath. */}
+      {/* Leaderboard modal — every play is recorded in localStorage. The panel is
+          rankinglist_alpha.png (locked to its own aspect ratio so it never
+          stretches/distorts), with the mascot avatar sitting BEHIND it (lower
+          z-index) so it only shows through the frame's punched-out circular
+          window instead of covering the ornate border. Sized from real vw/vh
+          (see rankModalW above), so it can never exceed the screen. */}
       {showLeaderboard && (
         <div
           onPointerDown={() => setShowLeaderboard(false)}
@@ -654,126 +688,110 @@ export default function Lobby({ onPlay }: LobbyProps) {
             alignItems: "flex-start",
             justifyContent: "center",
             zIndex: 50,
-            padding: "6% 20px 20px",
+            padding: "6% 16px 16px",
           }}
         >
           <div
             onPointerDown={(e) => e.stopPropagation()}
             style={{
               position: "relative",
-              width: "76%",
-              maxWidth: 560,
-              maxHeight: "82%",
+              width: rankModalW,
+              aspectRatio: "1308 / 1203",
             }}
           >
-            {/* Crown + mascot badge — a sibling of the panel (not clipped by its
-                overflow:hidden), straddling the top border like a season-pass tier icon. */}
+            {/* Avatar — zIndex 1, BEHIND the frame image (zIndex 2), so it's only
+                visible through the frame's circular cutout. */}
             <div
               style={{
                 position: "absolute",
-                top: 0,
                 left: "50%",
-                transform: "translate(-50%,-56%)",
+                top: "15.8%",
+                transform: "translate(-50%,-50%)",
+                zIndex: 1,
+              }}
+            >
+              <MascotHead size={rankAvatarSize} />
+            </div>
+
+            {/* Frame background */}
+            <img
+              src={rankingListBg}
+              alt=""
+              draggable={false}
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                zIndex: 2,
+                pointerEvents: "none",
+              }}
+            />
+
+            <button
+              onPointerDown={() => setShowLeaderboard(false)}
+              style={{
+                position: "absolute",
+                right: "3%",
+                top: "2%",
+                zIndex: 4,
+                background: "rgba(20,20,40,0.55)",
+                border: "1px solid rgba(255,255,255,0.35)",
+                borderRadius: 8,
+                color: "#fff",
+                width: 28,
+                height: 28,
+                cursor: "pointer",
+                fontSize: 14,
+                fontFamily: "sans-serif",
+                touchAction: "manipulation",
+              }}
+            >
+              ✕
+            </button>
+
+            {/* Content — kept inside the frame's inner navy area (below the
+                crown/ribbon art, inside the gold border) at zIndex 3. */}
+            <div
+              style={{
+                position: "absolute",
+                left: "8%",
+                right: "8%",
+                top: "30%",
+                bottom: "7%",
                 zIndex: 3,
                 display: "flex",
                 flexDirection: "column",
-                alignItems: "center",
-              }}
-            >
-              <span
-                style={{
-                  fontSize: 34,
-                  marginBottom: -18,
-                  filter: "drop-shadow(0 3px 5px rgba(0,0,0,0.6))",
-                }}
-              >
-                👑
-              </span>
-              <div
-                style={{
-                  borderRadius: "50%",
-                  padding: 3,
-                  background: "linear-gradient(135deg,#fff2b8,#f0a020)",
-                  boxShadow: "0 4px 16px rgba(0,0,0,0.55)",
-                }}
-              >
-                <div
-                  style={{
-                    borderRadius: "50%",
-                    border: "3px solid #0a1730",
-                    overflow: "hidden",
-                    display: "flex",
-                  }}
-                >
-                  <MascotHead size={68} />
-                </div>
-              </div>
-            </div>
-
-            {/* Panel body */}
-            <div
-              style={{
-                width: "100%",
-                maxHeight: "100%",
-                marginTop: 30,
-                background: "linear-gradient(160deg,#182f5c,#070f24)",
-                border: "3px solid rgba(240,192,64,0.6)",
-                borderRadius: 22,
-                display: "flex",
-                flexDirection: "column",
                 overflow: "hidden",
-                boxShadow:
-                  "0 0 0 4px rgba(240,192,64,0.15), 0 10px 36px rgba(0,0,0,0.65)",
               }}
             >
               <div
                 style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  padding: "30px 18px 8px",
+                  textAlign: "center",
+                  color: "#ffe27a",
+                  fontWeight: 900,
+                  fontSize: 18,
+                  letterSpacing: 2,
+                  textShadow: "0 2px 8px rgba(0,0,0,0.7)",
+                  flexShrink: 0,
                 }}
               >
-                <div
-                  style={{
-                    flex: 1,
-                    textAlign: "center",
-                    color: "#ffe27a",
-                    fontWeight: 900,
-                    fontSize: 24,
-                    letterSpacing: 3,
-                    textShadow: "0 2px 8px rgba(0,0,0,0.7)",
-                  }}
-                >
-                  排行榜
-                </div>
-                <button
-                  onPointerDown={() => setShowLeaderboard(false)}
-                  style={{
-                    position: "absolute",
-                    right: 14,
-                    top: 14,
-                    background: "rgba(255,255,255,0.12)",
-                    border: "1px solid rgba(255,255,255,0.35)",
-                    borderRadius: 8,
-                    color: "#fff",
-                    width: 30,
-                    height: 30,
-                    cursor: "pointer",
-                    fontSize: 15,
-                    fontFamily: "sans-serif",
-                    touchAction: "manipulation",
-                  }}
-                >
-                  ✕
-                </button>
+                排行榜
               </div>
 
               {/* One tab per game — each keeps its own top-10 high-score table, since
                   raw scores aren't comparable across games with different point scales. */}
-              <div style={{ display: "flex", gap: 6, padding: "8px 16px 0" }}>
+              <div
+                style={{
+                  display: "flex",
+                  gap: 6,
+                  padding: "8px 0 0",
+                  flexShrink: 0,
+                }}
+              >
                 {LEVELS.map((lvl) => {
                   const active = boardTab === lvl.id;
+                  const art = RANKING_TAB_IMAGES[lvl.id];
                   return (
                     <button
                       key={lvl.id}
@@ -781,28 +799,23 @@ export default function Lobby({ onPlay }: LobbyProps) {
                       style={{
                         flex: 1,
                         display: "flex",
-                        flexDirection: "column",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        gap: 2,
-                        padding: "6px 2px",
-                        borderRadius: 12,
-                        background: active
-                          ? "rgba(240,192,64,0.24)"
-                          : "rgba(255,255,255,0.06)",
-                        border: active
-                          ? "1px solid rgba(240,192,64,0.8)"
-                          : "1px solid rgba(255,255,255,0.12)",
-                        color: active ? "#ffe27a" : "#aebbdb",
-                        fontWeight: active ? 800 : 600,
-                        fontSize: 11,
+                        background: "none",
+                        border: "none",
+                        padding: 0,
                         cursor: "pointer",
                         touchAction: "manipulation",
-                        lineHeight: 1.15,
                       }}
                     >
-                      <span style={{ fontSize: 16 }}>{lvl.icon}</span>
-                      <span>{lvl.name}</span>
+                      <img
+                        src={active ? art.on : art.off}
+                        alt={lvl.name}
+                        draggable={false}
+                        style={{
+                          width: "100%",
+                          display: "block",
+                          pointerEvents: "none",
+                        }}
+                      />
                     </button>
                   );
                 })}
@@ -811,8 +824,9 @@ export default function Lobby({ onPlay }: LobbyProps) {
               <div
                 style={{
                   overflowY: "auto",
-                  padding: "14px 18px 20px",
-                  minHeight: 140,
+                  padding: "10px 4px 0",
+                  flex: 1,
+                  minHeight: 0,
                 }}
               >
                 {(() => {
@@ -852,9 +866,9 @@ export default function Lobby({ onPlay }: LobbyProps) {
                   }
                   const RANK_MEDAL = ["🥇", "🥈", "🥉"];
                   const rankFontSize = (i: number) =>
-                    i === 0 ? 30 : i === 1 ? 25 : i === 2 ? 21 : 17;
+                    i === 0 ? 22 : i === 1 ? 19 : i === 2 ? 17 : 14;
                   const scoreFontSize = (i: number) =>
-                    i === 0 ? 40 : i === 1 ? 32 : i === 2 ? 27 : 21;
+                    i === 0 ? 26 : i === 1 ? 22 : i === 2 ? 19 : 16;
                   const rankColor = (i: number) =>
                     i === 0
                       ? "#ffd700"
@@ -869,14 +883,14 @@ export default function Lobby({ onPlay }: LobbyProps) {
                       style={{
                         display: "flex",
                         alignItems: "center",
-                        gap: 12,
-                        padding: i < 3 ? "11px 8px" : "8px 8px",
+                        gap: 8,
+                        padding: i < 3 ? "6px 4px" : "5px 4px",
                         borderBottom: "1px solid rgba(255,255,255,0.1)",
                       }}
                     >
                       <div
                         style={{
-                          width: 36,
+                          width: 26,
                           textAlign: "center",
                           lineHeight: 1,
                         }}
@@ -890,14 +904,14 @@ export default function Lobby({ onPlay }: LobbyProps) {
                             style={{
                               color: "#aebbdb",
                               fontWeight: 700,
-                              fontSize: 17,
+                              fontSize: 13,
                             }}
                           >
                             {i + 1}
                           </span>
                         )}
                       </div>
-                      <div style={{ color: "#aebbdb", fontSize: 14, flex: 1 }}>
+                      <div style={{ color: "#aebbdb", fontSize: 11, flex: 1 }}>
                         {formatTs(r.ts)}
                       </div>
                       <div
