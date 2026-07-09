@@ -895,7 +895,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
           gs.score += SCORE_LEGIT_MISS;
           gs.frozen = true;
           gs.frozenUntil = now + FREEZE_MS;
-          gs.frozenMsg = `被 ${call.caller} 罵：竟敢掛我電話！？`;
+          gs.frozenMsg = `${call.caller}：竟敢掛我電話！？`;
         }
         // Scam timed out = scammer gave up, no penalty
       }
@@ -1480,23 +1480,29 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
                     setShowExitConfirm(true);
                   }}
                   style={{
-                    width: s(42),
-                    height: s(42),
-                    background: "linear-gradient(135deg,#1e3a8a,#2563eb)",
-                    border: "2px solid #60a5fa",
-                    borderRadius: s(8),
-                    color: "#fff",
-                    fontSize: s(18),
+                    width: s(60),
+                    height: s(60),
+                    background: "transparent",
+                    border: "none",
+                    padding: 0,
                     cursor: "pointer",
                     touchAction: "manipulation",
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
-                    boxShadow: "0 4px 12px rgba(37,99,235,0.5)",
                     flexShrink: 0,
                   }}
                 >
-                  ↩
+                  <img
+                    src={`${import.meta.env.BASE_URL}sprites/back.png`}
+                    alt="返回"
+                    draggable={false}
+                    style={{
+                      width: s(60),
+                      height: s(60),
+                      objectFit: "contain",
+                    }}
+                  />
                 </button>
               </div>
 
@@ -1576,14 +1582,16 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
                   </div>
                 </div>
 
-                {/* D-pad */}
+                {/* D-pad + Phone buttons */}
                 <div
                   style={{
                     display: "flex",
-                    gap: s(portrait ? 10 : 12),
+                    gap: s(portrait ? 8 : 10),
                     pointerEvents: "auto",
+                    alignItems: "center",
                   }}
                 >
+                  {/* Left / Right direction buttons */}
                   {([-1, 1] as const).map((dir) => (
                     <button
                       key={dir}
@@ -1608,29 +1616,68 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
                         moveDirRef.current = 0;
                       }}
                       style={{
-                        width: s(portrait ? 60 : 56),
-                        height: s(portrait ? 60 : 56),
-                        background: "linear-gradient(135deg,#1e3a8a,#2563eb)",
-                        border: "2px solid rgba(147,197,253,0.7)",
-                        borderRadius: s(6),
-                        color: "#fff",
-                        fontSize: s(20),
-                        fontWeight: 700,
+                        width: s(portrait ? 74 : 68),
+                        height: s(portrait ? 74 : 68),
+                        background: "transparent",
+                        border: "none",
+                        padding: 0,
                         cursor: "pointer",
                         touchAction: "none",
                         userSelect: "none",
-                        boxShadow:
-                          "0 4px 14px rgba(37,99,235,0.5), inset 0 1px 0 rgba(255,255,255,0.15)",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
                       }}
                     >
-                      <span style={{ WebkitTextStroke: "1.5px #fff" }}>
-                        {dir === -1 ? "←" : "→"}
-                      </span>
+                      <img
+                        src={`${import.meta.env.BASE_URL}sprites/${dir === -1 ? "left.png" : "right.png"}`}
+                        alt={dir === -1 ? "左" : "右"}
+                        draggable={false}
+                        style={{
+                          width: "100%",
+                          height: "100%",
+                          objectFit: "contain",
+                        }}
+                      />
                     </button>
                   ))}
+
+                  {/* Z (掛) / X (接) phone buttons */}
+                  {(["Z.png", "X.png"] as const).map((img) => {
+                    const isDecline = img === "Z.png";
+                    return (
+                      <button
+                        key={img}
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          const c = gsRef.current.calls.find(
+                            (c) => !c.resolved,
+                          );
+                          if (c)
+                            isDecline
+                              ? handleDecline(c.id)
+                              : handleAnswer(c.id);
+                        }}
+                        style={{
+                          width: s(portrait ? 74 : 68),
+                          height: s(portrait ? 74 : 68),
+                          background: "transparent",
+                          border: "none",
+                          padding: 0,
+                          cursor: "pointer",
+                          touchAction: "manipulation",
+                        }}
+                      >
+                        <img
+                          src={`${import.meta.env.BASE_URL}sprites/${img}`}
+                          alt={isDecline ? "掛" : "接"}
+                          draggable={false}
+                          style={{
+                            width: "100%",
+                            height: "100%",
+                            objectFit: "contain",
+                          }}
+                        />
+                      </button>
+                    );
+                  })}
                 </div>
 
                 {/* STATUS */}
@@ -1838,28 +1885,19 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
                             onBack();
                           }}
                           style={{
-                            padding: `${s(9)}px ${s(16)}px`,
-                            background:
-                              "linear-gradient(135deg,rgb(30,58,138),rgb(37,99,235))",
-                            border: "2px solid rgba(147,197,253,0.7)",
-                            borderRadius: s(6),
-                            color: "#fff",
-                            fontSize: s(13),
-                            fontWeight: 700,
+                            background: "transparent",
+                            border: "none",
+                            padding: 0,
                             cursor: "pointer",
-                            touchAction: "none",
-                            userSelect: "none",
-                            boxShadow:
-                              "rgba(37,99,235,0.5) 0px 4px 14px, rgba(255,255,255,0.15) 0px 1px 0px inset",
-                            display: "flex",
-                            alignItems: "center",
-                            gap: s(6),
+                            touchAction: "manipulation",
                           }}
                         >
-                          <span style={{ fontSize: s(18), lineHeight: 1 }}>
-                            ↩
-                          </span>
-                          返回大廳
+                          <img
+                            src={`${import.meta.env.BASE_URL}sprites/backto.png`}
+                            alt="返回大廳"
+                            draggable={false}
+                            style={{ height: s(48), objectFit: "contain" }}
+                          />
                         </button>
                         <button
                           onPointerDown={(e) => {
@@ -1868,25 +1906,19 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
                             setShowExitConfirm(false);
                           }}
                           style={{
-                            padding: `${s(9)}px ${s(16)}px`,
-                            background:
-                              "linear-gradient(135deg,rgb(30,58,138),rgb(37,99,235))",
-                            border: "2px solid rgba(147,197,253,0.7)",
-                            borderRadius: s(6),
-                            color: "#fff",
-                            fontSize: s(13),
-                            fontWeight: 700,
+                            background: "transparent",
+                            border: "none",
+                            padding: 0,
                             cursor: "pointer",
-                            touchAction: "none",
-                            userSelect: "none",
-                            boxShadow:
-                              "rgba(37,99,235,0.5) 0px 4px 14px, rgba(255,255,255,0.15) 0px 1px 0px inset",
-                            display: "flex",
-                            alignItems: "center",
-                            gap: s(6),
+                            touchAction: "manipulation",
                           }}
                         >
-                          ▶ 繼續遊玩
+                          <img
+                            src={`${import.meta.env.BASE_URL}sprites/keep-play.png`}
+                            alt="繼續遊戲"
+                            draggable={false}
+                            style={{ height: s(48), objectFit: "contain" }}
+                          />
                         </button>
                       </div>
                     </div>
