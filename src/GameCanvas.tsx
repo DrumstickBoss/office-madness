@@ -289,7 +289,7 @@ function drawFreezeOverlay(
 
   ctx.save();
   ctx.imageSmoothingEnabled = false;
-  ctx.font = "bold 11px monospace";
+  ctx.font = "bold 11px 'Cubic11', monospace";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 
@@ -372,17 +372,17 @@ function drawIdleScreen(ctx: CanvasRenderingContext2D) {
   // Title
   ctx.textAlign = "center";
   ctx.fillStyle = "#f0c040";
-  ctx.font = `bold ${titleSize}px sans-serif`;
+  ctx.font = `bold ${titleSize}px 'Cubic11', sans-serif`;
   ctx.fillText("社畜接便當", cx, top);
 
   // Subtitle
   ctx.fillStyle = "#cbd5e1";
-  ctx.font = `${subSize}px sans-serif`;
+  ctx.font = `${subSize}px 'Cubic11', sans-serif`;
   ctx.fillText("60 秒內接住螢幕上方指定的特餐便當！", cx, top + gapTitle);
 
   // Rule rows — fit-content block, left-aligned within centred block
   const rulesTop = top + gapTitle + gapRules;
-  ctx.font = `${ruleSize}px sans-serif`;
+  ctx.font = `${ruleSize}px 'Cubic11', sans-serif`;
   const maxRuleW = Math.max(...rules.map((r) => ctx.measureText(r.text).width));
   const blockLeft = Math.max(8, cx - maxRuleW / 2);
   ctx.textAlign = "left";
@@ -394,7 +394,7 @@ function drawIdleScreen(ctx: CanvasRenderingContext2D) {
 
   // Start prompt
   ctx.fillStyle = "#3090cf";
-  ctx.font = `bold ${promptSize}px sans-serif`;
+  ctx.font = `bold ${promptSize}px 'Cubic11', sans-serif`;
   ctx.fillText(
     "點擊畫面開始遊戲",
     cx,
@@ -421,7 +421,7 @@ function drawGameOver(
 
   ctx.textAlign = "center";
   ctx.fillStyle = timeUp ? "#f0c040" : "#e74c3c";
-  ctx.font = `bold ${titleSize}px sans-serif`;
+  ctx.font = `bold ${titleSize}px 'Cubic11', sans-serif`;
   ctx.fillText(
     timeUp ? "⏰ 時間到！" : "GAME OVER",
     cx,
@@ -429,15 +429,15 @@ function drawGameOver(
   );
 
   ctx.fillStyle = "#fff";
-  ctx.font = `bold ${scoreSize}px sans-serif`;
+  ctx.font = `bold ${scoreSize}px 'Cubic11', sans-serif`;
   ctx.fillText(`最終分數：${score}`, cx, cy - Math.round(LH * 0.043));
 
   ctx.fillStyle = "#f0c040";
-  ctx.font = `${promptSize}px sans-serif`;
+  ctx.font = `${promptSize}px 'Cubic11', sans-serif`;
   ctx.fillText(`最高分：${hiScore}`, cx, cy + Math.round(LH * 0.014));
 
   ctx.fillStyle = "#4ade80";
-  ctx.font = `bold ${promptSize}px sans-serif`;
+  ctx.font = `bold ${promptSize}px 'Cubic11', sans-serif`;
   ctx.fillText("點擊畫面重新開始", cx, cy + Math.round(LH * 0.1));
 }
 
@@ -521,7 +521,7 @@ function CallOverlay({
         zIndex: 20,
         userSelect: "none",
         animation: "phoneSlideIn 0.3s ease-out",
-        fontFamily: "sans-serif",
+        fontFamily: "'Cubic11', sans-serif",
       }}
     >
       {/* Phone background — determines container height via natural aspect ratio */}
@@ -939,7 +939,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
 
         ctx.save();
         ctx.imageSmoothingEnabled = false;
-        ctx.font = "bold 11px monospace";
+        ctx.font = "bold 11px 'Cubic11', monospace";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
 
@@ -1150,7 +1150,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
     background: "rgba(5,15,40,0.92)",
     border: "2px solid #1e3a6e",
     borderRadius: s(8),
-    fontFamily: '"Courier New", Courier, monospace',
+    fontFamily: '"Cubic11", "Courier New", Courier, monospace',
     boxShadow:
       "0 4px 16px rgba(0,0,0,0.7), inset 0 1px 0 rgba(100,160,255,0.08)",
     color: "#fff",
@@ -1829,7 +1829,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
                       background: "rgba(5,15,40,0.92)",
                       border: "2px solid rgb(30,58,110)",
                       borderRadius: s(8),
-                      fontFamily: '"Courier New", Courier, monospace',
+                      fontFamily: '"Cubic11", "Courier New", Courier, monospace',
                       boxShadow:
                         "rgba(0,0,0,0.7) 0px 4px 16px, rgba(100,160,255,0.08) 0px 1px 0px inset",
                       color: "#fff",
@@ -1965,7 +1965,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
                   fontSize: s(12),
                   fontWeight: 700,
                   letterSpacing: 0.5,
-                  fontFamily: '"Courier New", Courier, monospace',
+                  fontFamily: '"Cubic11", "Courier New", Courier, monospace',
                 }}
               >
                 返回大廳

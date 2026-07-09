@@ -1,0 +1,13 @@
+@font-face {
+  font-family: "Cubic11";
+  src: url("./assets/Cubic_11.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+html,
+body,
+#root {
+  font-family: "Cubic11", sans-serif;
+}

@@ -172,10 +172,10 @@ export default function Lobby({ onPlay }: LobbyProps) {
   // Node positions as fractions (0..1) of the background image, sampled directly
   // from home_bg.png's four circles so they stay pinned to the art at any size.
   const levelNodes: Array<{ level: LevelDef; fx: number; fy: number }> = [
-    { level: LEVELS[0], fx: 0.313, fy: 0.696 }, // GREEN  bottom-left
-    { level: LEVELS[1], fx: 0.301, fy: 0.318 }, // YELLOW upper-left
-    { level: LEVELS[2], fx: 0.677, fy: 0.3 }, // PURPLE upper-right
-    { level: LEVELS[3], fx: 0.696, fy: 0.694 }, // BLUE   bottom-right
+    { level: LEVELS[0], fx: 0.29, fy: 0.68 }, // GREEN  bottom-left
+    { level: LEVELS[1], fx: 0.285, fy: 0.29 }, // YELLOW upper-left
+    { level: LEVELS[2], fx: 0.67, fy: 0.3 }, // PURPLE upper-right
+    { level: LEVELS[3], fx: 0.68, fy: 0.67 }, // BLUE   bottom-right
   ];
 
   const btnW = Math.round(Math.min(210, imgW * 0.16));
@@ -199,7 +199,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
         width: "100%",
         height: "100%",
         overflow: "hidden",
-        fontFamily: "sans-serif",
+        fontFamily: "'Cubic11', sans-serif",
         background: "#000",
       }}
     >
@@ -226,10 +226,10 @@ export default function Lobby({ onPlay }: LobbyProps) {
         draggable={false}
         style={{
           position: "absolute",
-          left: imgLeft + 0.51 * imgW,
+          left: imgLeft + 0.5 * imgW,
           top: imgTop + 0.67 * imgH,
           transform: "translate(-50%,-50%)",
-          width: Math.round(150 * scale),
+          width: Math.round(180 * scale),
           pointerEvents: "none",
           zIndex: 1,
         }}
@@ -257,7 +257,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
               zIndex: 2,
               left: imgLeft + fx * imgW,
               top: imgTop + fy * imgH,
-              transform: `translate(-50%,-50%) scale(${isSelected ? 1.8 : 1.7})`,
+              transform: `translate(-50%,-50%) scale(${isSelected ? 1.6 : 1.5})`,
               width: btnW,
               cursor: level.unlocked ? "pointer" : "default",
               touchAction: "manipulation",
@@ -304,8 +304,8 @@ export default function Lobby({ onPlay }: LobbyProps) {
               <div
                 style={{
                   position: "absolute",
-                  left: "50%",
-                  bottom: "5%",
+                  left: "55%",
+                  bottom: "60%",
                   transform: "translateX(-50%)",
                   display: "flex",
                   flexDirection: "column",
@@ -316,17 +316,13 @@ export default function Lobby({ onPlay }: LobbyProps) {
               >
                 <div
                   style={{
-                    background: "rgba(0,0,0,0.72)",
                     color: "#f0c040",
                     fontSize: Math.max(9, Math.round(btnW * 0.075)),
                     fontWeight: 700,
-                    padding: "2px 8px",
-                    borderRadius: 20,
-                    border: "1px solid rgba(240,192,64,0.5)",
                     whiteSpace: "nowrap",
                   }}
                 >
-                  {best > 0 ? `🏆 ${best}` : "尚未挑戰"}
+                  {best > 0 ? best : "尚未挑戰"}
                 </div>
                 {best > 0 && (
                   <div
@@ -407,7 +403,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
                     border: "1px solid rgba(240,192,64,0.6)",
                     background: "rgba(0,0,0,0.45)",
                     color: "#fff",
-                    fontFamily: "sans-serif",
+                    fontFamily: "'Cubic11', sans-serif",
                   }}
                 />
                 <button
@@ -541,7 +537,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
               borderRadius: 20,
               border: "1px solid rgba(240,192,64,0.4)",
               cursor: "pointer",
-              fontFamily: "sans-serif",
+              fontFamily: "'Cubic11', sans-serif",
               touchAction: "manipulation",
             }}
           >
@@ -643,15 +639,15 @@ export default function Lobby({ onPlay }: LobbyProps) {
               ? "linear-gradient(135deg,#f0a020,#e06010)"
               : "rgba(60,60,60,0.7)",
             color: canStart ? "#fff" : "#666",
-            border: canStart ? "3px solid #000" : "2px solid #444",
-            boxShadow: canStart
-              ? "0 0 0 2px #f0c040, 0 4px 20px rgba(240,160,32,0.5)"
-              : "none",
+            // border: canStart ? "3px solid #000" : "2px solid #444",
+            // boxShadow: canStart
+            //   ? "0 0 0 2px #f0c040, 0 4px 20px rgba(240,160,32,0.5)"
+            //   : "none",
             borderRadius: Math.round(12 * scale),
             fontWeight: 700,
             fontSize: Math.round(16 * scale),
             cursor: canStart ? "pointer" : "not-allowed",
-            fontFamily: "sans-serif",
+            fontFamily: "'Cubic11', sans-serif",
             whiteSpace: "nowrap",
             touchAction: "manipulation",
             textShadow: canStart ? "0 1px 4px rgba(0,0,0,0.4)" : "none",
@@ -667,7 +663,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
               radius={Math.round(9 * scale)}
             />
           </div>
-          <span>{canStart ? "開始挑戰 →" : "選擇關卡"}</span>
+          <span>{canStart ? "開始挑戰" : "選擇關卡"}</span>
         </button>
       </div>
 
@@ -743,7 +739,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
                 height: 28,
                 cursor: "pointer",
                 fontSize: 14,
-                fontFamily: "sans-serif",
+                fontFamily: "'Cubic11', sans-serif",
                 touchAction: "manipulation",
               }}
             >
