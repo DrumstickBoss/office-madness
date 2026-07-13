@@ -16,7 +16,12 @@ let CH = typeof window !== "undefined" ? window.innerHeight : 700;
 
 const _p0 = typeof window !== "undefined" && isPortraitViewport();
 let LW = _p0 ? 390 : 720;
-let GS = typeof window !== "undefined" ? (_p0 ? CW / LW : Math.min(CW / LW, CH / 480)) : 1;
+let GS =
+  typeof window !== "undefined"
+    ? _p0
+      ? CW / LW
+      : Math.min(CW / LW, CH / 480)
+    : 1;
 let LH = typeof window !== "undefined" ? Math.round(CH / GS) : _p0 ? 700 : 480;
 
 // ─── Game tuning ───────────────────────────────────────────────────────────
@@ -96,26 +101,43 @@ const BIN_IMG_CACHE = new Map<string, HTMLImageElement>();
   }
 });
 // How long the lid stays on frame 2 / frame 3 after trash lands, before resetting to frame 1
-const BIN_OPEN_FRAME2_MS = 60;
-const BIN_OPEN_FRAME3_MS = 200;
+const BIN_OPEN_FRAME2_MS = 100;
+const BIN_OPEN_FRAME3_MS = 700;
 
 interface TrashDef {
   category: BinType;
-  icon: string;
+  icon: string; // filename under sprites/stage2/ (trash sprite key)
   label: string;
 }
 const TRASH_ITEMS: TrashDef[] = [
-  { category: "recycle", icon: "🥤", label: "寶特瓶" },
-  { category: "recycle", icon: "📰", label: "廢紙" },
-  { category: "recycle", icon: "🧴", label: "玻璃瓶" },
-  { category: "recycle", icon: "🧋", label: "鐵鋁罐" },
-  { category: "food", icon: "🍌", label: "香蕉皮" },
-  { category: "food", icon: "🍎", label: "蘋果核" },
-  { category: "food", icon: "🍚", label: "剩飯" },
-  { category: "general", icon: "🧻", label: "衛生紙" },
-  { category: "general", icon: "🍬", label: "開過的包裝紙" },
-  { category: "general", icon: "🪥", label: "舊牙刷" },
+  { category: "recycle", icon: "recycle-1.png", label: "寶特瓶" },
+  { category: "recycle", icon: "recycle-3.png", label: "廢紙" },
+  { category: "recycle", icon: "recycle-2.png", label: "沐浴乳瓶" },
+  { category: "recycle", icon: "recycle-4.png", label: "手搖飲料杯" },
+  { category: "food", icon: "food-4.png", label: "香蕉皮" },
+  { category: "food", icon: "food-1.png", label: "蘋果核" },
+  { category: "food", icon: "food-6.png", label: "剩飯" },
+  { category: "general", icon: "general-1.png", label: "衛生紙" },
+  { category: "general", icon: "general-2.png", label: "糖果包裝紙" },
+  { category: "general", icon: "general-3.png", label: "舊牙刷" },
 ];
+// Trash-item sprites — preloaded up front, same pattern as BIN_IMG_CACHE.
+const TRASH_IMG_CACHE = new Map<string, HTMLImageElement>();
+TRASH_ITEMS.forEach(({ icon }) => {
+  if (TRASH_IMG_CACHE.has(icon)) return;
+  const img = new Image();
+  img.src = `${import.meta.env.BASE_URL}sprites/stage2/${icon}`;
+  TRASH_IMG_CACHE.set(icon, img);
+});
+
+// Thrower — viewed from behind; only the top half is ever drawn (the rest is
+// cropped off, as if the character is standing behind the counter/foreground).
+const THROWER_IMG = new Image();
+THROWER_IMG.src = `${import.meta.env.BASE_URL}sprites/stage2/back.gif`;
+
+// Garbage truck — slides across the screen once as Bonus Time's intro transition.
+const TRUCK_IMG = new Image();
+TRUCK_IMG.src = `${import.meta.env.BASE_URL}sprites/stage2/truck.gif`;
 
 interface DecoyDef {
   icon: string;
@@ -590,8 +612,8 @@ function update(gs: GameState, now: number, dtMs: number) {
     if (gs.truckX > LW + 200) gs.truckActive = false;
   }
 
-  // Bonus spawns
-  if (gs.phase === "bonus" && now >= gs.bonusSpawnAt) {
+  // Bonus spawns — wait for the truck to fully drive off-screen before anything appears
+  if (gs.phase === "bonus" && !gs.truckActive && now >= gs.bonusSpawnAt) {
     gs.bonusSpawnAt = now + rng(BONUS_SPAWN_MIN_MS, BONUS_SPAWN_MAX_MS);
     const t = pick(TRASH_ITEMS);
     const fromLeft = Math.random() < 0.5;
@@ -822,31 +844,46 @@ function drawBins(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   }
 }
 
+// Draws a trash-item sprite centered at (0,0), scaled to fit within maxSize
+// while preserving its natural aspect ratio (sprites aren't all square).
+function drawTrashSprite(
+  ctx: CanvasRenderingContext2D,
+  key: string,
+  maxSize: number,
+) {
+  const img = TRASH_IMG_CACHE.get(key);
+  if (img && img.complete && img.naturalWidth > 0) {
+    const ratio = img.naturalWidth / img.naturalHeight;
+    const dw = ratio > 1 ? maxSize : maxSize * ratio;
+    const dh = ratio > 1 ? maxSize / ratio : maxSize;
+    ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
+  } else {
+    ctx.fillStyle = "#888";
+    drawRoundRect(ctx, -maxSize / 2, -maxSize / 2, maxSize, maxSize, 6);
+    ctx.fill();
+  }
+}
+
 function drawFlyingItem(ctx: CanvasRenderingContext2D, it: FlyingItem) {
   ctx.save();
   ctx.translate(it.x, it.y);
   ctx.rotate(it.rot);
-  if (it.bonus) {
-    // Light halo so items pop against Bonus Time's dark background
-    const glow = ctx.createRadialGradient(0, 0, 2, 0, 0, 26);
-    glow.addColorStop(0, "rgba(255,240,200,0.55)");
-    glow.addColorStop(1, "rgba(255,240,200,0)");
-    ctx.fillStyle = glow;
-    ctx.beginPath();
-    ctx.arc(0, 0, 26, 0, Math.PI * 2);
-    ctx.fill();
-  }
   if (it.kind === "decoy") {
     ctx.shadowColor = "rgba(255,60,60,0.55)";
     ctx.shadowBlur = 16;
-  } else if (it.bonus) {
-    ctx.shadowColor = "rgba(0,0,0,0.7)";
-    ctx.shadowBlur = 6;
+    ctx.font = EMOJI_FONT(38);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(it.icon, 0, 0);
+  } else {
+    if (it.bonus) {
+      ctx.shadowColor = "rgba(0,0,0,0.7)";
+      ctx.shadowBlur = 6;
+    }
+    // Sized up to match Level 1's item proportions (ITEM_SIZE 44); Bonus
+    // Time's truck-thrown items go a step bigger still, as requested.
+    drawTrashSprite(ctx, it.icon, it.bonus ? 54 : 44);
   }
-  ctx.font = EMOJI_FONT(it.kind === "decoy" ? 38 : 32);
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(it.icon, 0, 0);
   ctx.restore();
 }
 
@@ -894,6 +931,10 @@ function drawPowerBar(ctx: CanvasRenderingContext2D, gs: GameState) {
   ctx.restore();
 }
 
+// Thrower body — only the top half of the sprite is ever drawn (the source
+// rect stops at naturalHeight/2), as if the character stands behind the counter.
+// The body itself stays still; `bob` is only applied to the held-item float above it.
+const THROWER_FULL_H = 160;
 function drawThrower(
   ctx: CanvasRenderingContext2D,
   gs: GameState,
@@ -901,18 +942,36 @@ function drawThrower(
 ) {
   const cx = LW / 2;
   const bob = Math.sin(now / 260) * 4;
-  ctx.font = EMOJI_FONT(48);
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("🧍", cx, THROWER_Y() + 30);
+
+  const img = THROWER_IMG;
+  if (img.complete && img.naturalWidth > 0) {
+    const drawW = (THROWER_FULL_H * img.naturalWidth) / img.naturalHeight;
+    const halfDrawH = THROWER_FULL_H / 2;
+    const halfSrcH = img.naturalHeight / 2;
+    const bottomY = THROWER_Y() + 40;
+    ctx.drawImage(
+      img,
+      0,
+      0,
+      img.naturalWidth,
+      halfSrcH,
+      cx - drawW / 2,
+      bottomY - halfDrawH,
+      drawW,
+      halfDrawH,
+    );
+  }
   if (!gs.aiming) {
     ctx.save();
     if (gs.queueItem.kind === "decoy") {
       ctx.shadowColor = "rgba(255,60,60,0.65)";
       ctx.shadowBlur = 18;
+      ctx.font = EMOJI_FONT(40);
+      ctx.fillText(gs.queueItem.icon, cx, THROWER_Y() - 40 + bob);
+    } else {
+      ctx.translate(cx, THROWER_Y() - 40 + bob);
+      drawTrashSprite(ctx, gs.queueItem.icon, 50);
     }
-    ctx.font = EMOJI_FONT(40);
-    ctx.fillText(gs.queueItem.icon, cx, THROWER_Y() - 40 + bob);
     ctx.restore();
   }
 }
@@ -1032,14 +1091,21 @@ function drawPopups(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   }
 }
 
+const TRUCK_DRAW_H = 110;
 function drawTruck(ctx: CanvasRenderingContext2D, gs: GameState) {
   if (!gs.truckActive) return;
-  // Kept small and tucked above the play area so it never overlaps flying items
+  // Tucked above the play area so it never overlaps flying items
+  const img = TRUCK_IMG;
+  if (!img.complete || img.naturalWidth === 0) return;
   ctx.save();
-  ctx.font = EMOJI_FONT(34);
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("🚛", gs.truckX, 30);
+  const drawW = (TRUCK_DRAW_H * img.naturalWidth) / img.naturalHeight;
+  ctx.drawImage(
+    img,
+    gs.truckX - drawW / 2,
+    45 - TRUCK_DRAW_H / 2,
+    drawW,
+    TRUCK_DRAW_H,
+  );
   ctx.restore();
 }
 
@@ -1237,6 +1303,12 @@ export default function Level2({ onBack }: Level2Props) {
     videoRef.current?.play().catch(() => {});
   }, []);
 
+  // Bonus Time ("垃圾車模式") plays its own Für Elise cue — mute the background
+  // video's own audio track while it's active so the two don't overlap.
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.muted = phase === "bonus";
+  }, [phase]);
+
   // ── Render loop ─────────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current!;
@@ -1249,7 +1321,8 @@ export default function Level2({ onBack }: Level2Props) {
       const gs = gsRef.current;
       const dt = Math.min(now - gs.lastFrameTs, 50);
       gs.lastFrameTs = now;
-      if (gs.status === "playing" && !exitConfirmRef.current) update(gs, now, dt);
+      if (gs.status === "playing" && !exitConfirmRef.current)
+        update(gs, now, dt);
       render(ctx, gs, now);
       if (gs.phase !== phaseSent) {
         phaseSent = gs.phase;
@@ -1458,7 +1531,7 @@ export default function Level2({ onBack }: Level2Props) {
         playsInline
         style={{
           position: "absolute",
-          top: "28%",
+          top: "30%",
           left: 0,
           width: "100%",
           height: "auto",
@@ -1566,7 +1639,8 @@ export default function Level2({ onBack }: Level2Props) {
         </div>
       )}
 
-      {/* Exit button — top-right, opens a confirm dialog instead of leaving instantly */}
+      {/* Exit button — top-right, opens a confirm dialog instead of leaving instantly.
+          Same image-button treatment as GameCanvas (Level 1) for a consistent look. */}
       {status === "playing" && (
         <button
           onPointerDown={(e) => {
@@ -1579,22 +1653,24 @@ export default function Level2({ onBack }: Level2Props) {
             top: s(8),
             right: s(8),
             zIndex: 40,
-            width: s(42),
-            height: s(42),
-            background: "linear-gradient(135deg,#1e3a8a,#2563eb)",
-            border: "2px solid #60a5fa",
-            borderRadius: s(8),
-            color: "#fff",
-            fontSize: s(18),
+            width: s(60),
+            height: s(60),
+            background: "transparent",
+            border: "none",
+            padding: 0,
             cursor: "pointer",
             touchAction: "manipulation",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            boxShadow: "0 4px 12px rgba(37,99,235,0.5)",
           }}
         >
-          ↩
+          <img
+            src={`${import.meta.env.BASE_URL}sprites/back.png`}
+            alt="返回"
+            draggable={false}
+            style={{ width: s(60), height: s(60), objectFit: "contain" }}
+          />
         </button>
       )}
 
@@ -1650,6 +1726,7 @@ export default function Level2({ onBack }: Level2Props) {
                   fontWeight: 700,
                   textAlign: "center",
                   letterSpacing: 0.5,
+                  animation: "blink 1s infinite",
                 }}
               >
                 ！ 此關成績將會歸零 ！
@@ -1664,20 +1741,19 @@ export default function Level2({ onBack }: Level2Props) {
                     onBack();
                   }}
                   style={{
-                    padding: `${s(9)}px ${s(16)}px`,
-                    background:
-                      "linear-gradient(135deg,rgb(30,58,138),rgb(37,99,235))",
-                    border: "2px solid rgba(147,197,253,0.7)",
-                    borderRadius: s(6),
-                    color: "#fff",
-                    fontSize: s(13),
-                    fontWeight: 700,
+                    background: "transparent",
+                    border: "none",
+                    padding: 0,
                     cursor: "pointer",
-                    touchAction: "none",
-                    userSelect: "none",
+                    touchAction: "manipulation",
                   }}
                 >
-                  返回大廳
+                  <img
+                    src={`${import.meta.env.BASE_URL}sprites/backto.png`}
+                    alt="返回大廳"
+                    draggable={false}
+                    style={{ height: s(48), objectFit: "contain" }}
+                  />
                 </button>
                 <button
                   onPointerDown={(e) => {
@@ -1686,19 +1762,19 @@ export default function Level2({ onBack }: Level2Props) {
                     setShowExitConfirm(false);
                   }}
                   style={{
-                    padding: `${s(9)}px ${s(16)}px`,
-                    background: "rgba(255,255,255,0.1)",
-                    border: "2px solid rgba(255,255,255,0.3)",
-                    borderRadius: s(6),
-                    color: "#fff",
-                    fontSize: s(13),
-                    fontWeight: 700,
+                    background: "transparent",
+                    border: "none",
+                    padding: 0,
                     cursor: "pointer",
-                    touchAction: "none",
-                    userSelect: "none",
+                    touchAction: "manipulation",
                   }}
                 >
-                  取消
+                  <img
+                    src={`${import.meta.env.BASE_URL}sprites/keep-play.png`}
+                    alt="繼續遊戲"
+                    draggable={false}
+                    style={{ height: s(48), objectFit: "contain" }}
+                  />
                 </button>
               </div>
             </div>
@@ -1706,33 +1782,55 @@ export default function Level2({ onBack }: Level2Props) {
         </div>
       )}
 
-      {/* Back button — hidden mid-play so it doesn't overlap the HUD */}
+      {/* Back button — hidden mid-play so it doesn't overlap the HUD.
+          Same scaled gradient button as GameCanvas (Level 1) for a consistent look. */}
       {status !== "playing" && (
         <button
-          onPointerDown={onBack}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            onBack();
+          }}
           style={{
             position: "absolute",
-            top: 10,
-            left: 10,
-            zIndex: 20,
-            padding: "6px 12px",
-            background: "rgba(0,0,0,0.5)",
+            top: s(10),
+            left: s(10),
+            zIndex: 60,
+            padding: `${s(8)}px ${s(14)}px`,
+            background: "linear-gradient(135deg,rgb(30,58,138),rgb(37,99,235))",
+            border: "2px solid rgba(147,197,253,0.7)",
+            borderRadius: s(6),
             color: "#fff",
-            border: "1px solid rgba(255,255,255,0.35)",
-            borderRadius: 8,
-            fontSize: 13,
+            fontWeight: 700,
             cursor: "pointer",
-            fontFamily: "'Cubic11', sans-serif",
-            touchAction: "manipulation",
+            touchAction: "none",
+            userSelect: "none",
+            boxShadow:
+              "rgba(37,99,235,0.5) 0px 4px 14px, rgba(255,255,255,0.15) 0px 1px 0px inset",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexDirection: "column",
+            gap: s(2),
           }}
         >
-          ← 返回
+          <span style={{ fontSize: s(14), lineHeight: 1 }}>←</span>
+          <span
+            style={{
+              fontSize: s(12),
+              fontWeight: 700,
+              letterSpacing: 0.5,
+              fontFamily: '"Cubic11", "Courier New", Courier, monospace',
+            }}
+          >
+            返回大廳
+          </span>
         </button>
       )}
 
       {/* Put-down button — the safe way to dispose of decoys; wrong on real trash costs points.
           Positioned from the physical viewport height using GS so it still lines up with the
-          canvas-drawn thrower now that the canvas itself is no longer CSS-scaled. */}
+          canvas-drawn thrower now that the canvas itself is no longer CSS-scaled. Uses the
+          button.gif art (label baked in) instead of a plain text button. */}
       {status === "playing" && phase === "throw" && (
         <button
           onPointerDown={putDown}
@@ -1741,21 +1839,21 @@ export default function Level2({ onBack }: Level2Props) {
             right: 14,
             top: vpH - 120 * GS,
             zIndex: 20,
-            width: 74,
-            padding: "10px 0",
-            background: "rgba(0,0,0,0.55)",
-            color: "#fff",
-            border: "2px solid rgba(255,255,255,0.4)",
-            borderRadius: 12,
-            fontSize: 13,
-            fontWeight: 700,
+            width: s(84),
+            background: "transparent",
+            border: "none",
+            padding: 0,
             cursor: "pointer",
-            fontFamily: "'Cubic11', sans-serif",
             touchAction: "manipulation",
             userSelect: "none",
           }}
         >
-          🖐️ 放下
+          <img
+            src={`${import.meta.env.BASE_URL}sprites/stage2/button.gif`}
+            alt="放下"
+            draggable={false}
+            style={{ width: "100%", height: "auto", display: "block" }}
+          />
         </button>
       )}
 
@@ -1763,122 +1861,122 @@ export default function Level2({ onBack }: Level2Props) {
       {status === "idle" && (
         <div
           style={{
-              position: "absolute",
-              inset: 0,
-              background: "rgba(8,16,36,0.94)",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              padding: 20,
-              gap: 10,
-              textAlign: "center",
-              fontFamily: "'Cubic11', sans-serif",
-              color: "#fff",
+            position: "absolute",
+            inset: 0,
+            background: "rgba(8,16,36,0.94)",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 20,
+            gap: 10,
+            textAlign: "center",
+            fontFamily: "'Cubic11', sans-serif",
+            color: "#fff",
+          }}
+        >
+          <div style={{ fontSize: 46 }}>♻️</div>
+          <div style={{ fontSize: 26, fontWeight: 800, color: "#60a5fa" }}>
+            垃圾分類王
+          </div>
+          <div
+            style={{
+              fontSize: 13,
+              color: "#cbd5e1",
+              lineHeight: 1.7,
+              maxWidth: 320,
             }}
           >
-            <div style={{ fontSize: 46 }}>♻️</div>
-            <div style={{ fontSize: 26, fontWeight: 800, color: "#60a5fa" }}>
-              垃圾分類王
-            </div>
-            <div
-              style={{
-                fontSize: 13,
-                color: "#cbd5e1",
-                lineHeight: 1.7,
-                maxWidth: 320,
-              }}
-            >
-              🎯 向上滑動把垃圾丟進正確的桶子！
-              <br />
-              🙅 混進來的「老人家」「女友」別丟進桶子！
-              <br />
-              🚛 最後倒數垃圾車會來襲，手指劃過垃圾消滅它們拿 Bonus！
-            </div>
-            <div style={{ fontSize: 11, color: "#7a8bab" }}>
-              （放心，遊戲中會即時提示怎麼玩）
-            </div>
+            🎯 向上滑動把垃圾丟進正確的桶子！
+            <br />
+            🙅 混進來的「老人家」「女友」別丟進桶子！
+            <br />
+            🚛 最後倒數垃圾車會來襲，手指劃過垃圾消滅它們拿 Bonus！
+          </div>
+          <div style={{ fontSize: 11, color: "#7a8bab" }}>
+            （放心，遊戲中會即時提示怎麼玩）
+          </div>
+          <button
+            onPointerDown={startGame}
+            style={{
+              marginTop: 10,
+              padding: "12px 32px",
+              background: "linear-gradient(135deg,#2f6fd6,#1c4fa8)",
+              color: "#fff",
+              border: "2px solid #60a5fa",
+              borderRadius: 12,
+              fontSize: 17,
+              fontWeight: 700,
+              cursor: "pointer",
+              fontFamily: "'Cubic11', sans-serif",
+              touchAction: "manipulation",
+            }}
+          >
+            開始遊戲 →
+          </button>
+        </div>
+      )}
+
+      {/* Gameover screen */}
+      {status === "gameover" && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            background: "rgba(8,16,36,0.94)",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 12,
+            fontFamily: "'Cubic11', sans-serif",
+            color: "#fff",
+          }}
+        >
+          <div style={{ fontSize: 24, fontWeight: 800, color: "#f0c040" }}>
+            時間到！
+          </div>
+          <div style={{ fontSize: 34, fontWeight: 800 }}>{finalScore} 分</div>
+          <div style={{ fontSize: 14, color: "#93c5fd" }}>
+            最高分：{Math.max(gsRef.current.best, finalScore)}
+          </div>
+          <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
             <button
               onPointerDown={startGame}
               style={{
-                marginTop: 10,
-                padding: "12px 32px",
+                padding: "10px 22px",
                 background: "linear-gradient(135deg,#2f6fd6,#1c4fa8)",
                 color: "#fff",
                 border: "2px solid #60a5fa",
-                borderRadius: 12,
-                fontSize: 17,
+                borderRadius: 10,
+                fontSize: 15,
                 fontWeight: 700,
                 cursor: "pointer",
                 fontFamily: "'Cubic11', sans-serif",
                 touchAction: "manipulation",
               }}
             >
-              開始遊戲 →
+              再玩一次
+            </button>
+            <button
+              onPointerDown={onBack}
+              style={{
+                padding: "10px 22px",
+                background: "rgba(255,255,255,0.1)",
+                color: "#fff",
+                border: "2px solid rgba(255,255,255,0.3)",
+                borderRadius: 10,
+                fontSize: 15,
+                cursor: "pointer",
+                fontFamily: "'Cubic11', sans-serif",
+                touchAction: "manipulation",
+              }}
+            >
+              返回大廳
             </button>
           </div>
-        )}
-
-        {/* Gameover screen */}
-        {status === "gameover" && (
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              background: "rgba(8,16,36,0.94)",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 12,
-              fontFamily: "'Cubic11', sans-serif",
-              color: "#fff",
-            }}
-          >
-            <div style={{ fontSize: 24, fontWeight: 800, color: "#f0c040" }}>
-              時間到！
-            </div>
-            <div style={{ fontSize: 34, fontWeight: 800 }}>{finalScore} 分</div>
-            <div style={{ fontSize: 14, color: "#93c5fd" }}>
-              最高分：{Math.max(gsRef.current.best, finalScore)}
-            </div>
-            <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
-              <button
-                onPointerDown={startGame}
-                style={{
-                  padding: "10px 22px",
-                  background: "linear-gradient(135deg,#2f6fd6,#1c4fa8)",
-                  color: "#fff",
-                  border: "2px solid #60a5fa",
-                  borderRadius: 10,
-                  fontSize: 15,
-                  fontWeight: 700,
-                  cursor: "pointer",
-                  fontFamily: "'Cubic11', sans-serif",
-                  touchAction: "manipulation",
-                }}
-              >
-                再玩一次
-              </button>
-              <button
-                onPointerDown={onBack}
-                style={{
-                  padding: "10px 22px",
-                  background: "rgba(255,255,255,0.1)",
-                  color: "#fff",
-                  border: "2px solid rgba(255,255,255,0.3)",
-                  borderRadius: 10,
-                  fontSize: 15,
-                  cursor: "pointer",
-                  fontFamily: "'Cubic11', sans-serif",
-                  touchAction: "manipulation",
-                }}
-              >
-                返回大廳
-              </button>
-            </div>
-          </div>
-        )}
+        </div>
+      )}
     </div>
   );
 }
