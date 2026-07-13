@@ -1,6 +1,8 @@
 import { useRef, useEffect, useState, useCallback } from "react";
 import { addRecord, getBestForLevel } from "./leaderboard";
-import game2BgSrc from "./assets/game2_bgm.mp4";
+import { startGame2Bgm, stopGame2Bgm } from "./game2bgm";
+import game2BgSrc from "./assets/game2_bgm.jpg";
+import game2InfoSrc from "./assets/game2_info.png";
 
 // ─── Canvas dimensions ────────────────────────────────────────────────────
 // The canvas fills the real viewport pixel-for-pixel (same approach as
@@ -26,7 +28,7 @@ let LH = typeof window !== "undefined" ? Math.round(CH / GS) : _p0 ? 700 : 480;
 
 // ─── Game tuning ───────────────────────────────────────────────────────────
 const THROW_PHASE_MS = 45_000;
-const BONUS_PHASE_MS = 14_000;
+const BONUS_PHASE_MS = 15_000;
 const TOTAL_MS = THROW_PHASE_MS + BONUS_PHASE_MS;
 const GRAVITY = 420; // px/s² — only applied to Bonus Time items; low enough that they arc up to mid-screen
 const DRAG_K = 4.2; // swipe px → launch velocity px/s (throws travel in a straight line)
@@ -35,8 +37,13 @@ const MIN_DRAG_DIST = 45;
 const SCORE_CORRECT = 100;
 const SCORE_WRONG_BIN = -30;
 const SCORE_DECOY_PENALTY = -500;
-const SCORE_PUTDOWN_WRONG = -50;
+const SCORE_TAXI_CORRECT = 100; // correctly throwing a decoy into the taxi
 const SCORE_SLICE = 50;
+// Player holds BATCH_SIZE items at once (free pick, any order); once every
+// slot has been thrown, a fresh batch refills all of them at once.
+const BATCH_SIZE = 3;
+const BATCH_SLOT_GAP = 62; // horizontal spacing between the 3 held-item slots
+const BATCH_SLOT_HIT_R = 34; // how close a pointer-down must land to a slot to start aiming it
 const BIN_W = 92;
 const BIN_H = 78;
 const BIN_REORDER_AT_MS = 15_000; // bins slide off-screen once and re-enter in a shuffled order — their only motion now
@@ -140,23 +147,76 @@ const TRUCK_IMG = new Image();
 TRUCK_IMG.src = `${import.meta.env.BASE_URL}sprites/stage2/truck.gif`;
 
 interface DecoyDef {
-  icon: string;
+  icon: string; // stable identity key (not a sprite filename — decoys have multiple sprites, see below)
+  idleImg: string; // held/queued preview's fallback, and the ambient cameo's "enter + hold" pose
+  mirrorImg: string; // ambient cameo's pose while walking back out (mirror of idleImg)
+  flyImg: string; // shown once actually thrown
+  side: "left" | "right"; // ambient cameo always enters/exits from this fixed edge
   label: string;
   penaltyMsg: string;
 }
 const DECOYS: DecoyDef[] = [
   {
-    icon: "👴",
+    icon: "grandpa",
+    idleImg: "grandpa-1.png",
+    mirrorImg: "grandpa-1-mirror.png",
+    flyImg: "grandpa-2.png",
+    side: "left",
     label: "迷路的老人家",
     penaltyMsg: "老人家：我還沒問完路啊！！",
   },
   {
-    icon: "😤",
+    icon: "gf",
+    idleImg: "gf-1.png",
+    mirrorImg: "gf-1-mirror.png",
+    flyImg: "gf-2.png",
+    side: "right",
     label: "查勤的女友",
     penaltyMsg: "啪！！女友：你居然想丟掉我？！",
   },
 ];
-const DECOY_CHANCE = 0.18;
+// Decoy sprites — preloaded up front, same pattern as TRASH_IMG_CACHE.
+const DECOY_IMG_CACHE = new Map<string, HTMLImageElement>();
+DECOYS.forEach(({ idleImg, mirrorImg, flyImg }) => {
+  [idleImg, mirrorImg, flyImg].forEach((file) => {
+    if (DECOY_IMG_CACHE.has(file)) return;
+    const img = new Image();
+    img.src = `${import.meta.env.BASE_URL}sprites/stage2/${file}`;
+    DECOY_IMG_CACHE.set(file, img);
+  });
+});
+
+// ─── Ambient background cameo ───────────────────────────────────────────────
+// Purely decorative — grandpa always walks on from the left, gf always from the
+// right (def.side), during the throw phase. Not interactive, no score effect;
+// just atmosphere behind the actual gameplay. Three phases: slide in (idleImg)
+// → hold in place (idleImg) → slide back out the same edge (mirrorImg).
+const BG_DECOY_ENTER_MS = 550;
+const BG_DECOY_HOLD_MS = 1900;
+const BG_DECOY_EXIT_MS = 550;
+const BG_DECOY_TOTAL_MS =
+  BG_DECOY_ENTER_MS + BG_DECOY_HOLD_MS + BG_DECOY_EXIT_MS;
+const BG_DECOY_GAP_MIN_MS = 5000;
+const BG_DECOY_GAP_MAX_MS = 10000;
+// 背景客串圖片大小 — 比手上丟的誘餌圖更大一點，純裝飾用。
+const BG_DECOY_SIZE = 190;
+
+// ─── Side targets: 計程車 (correct) / 輪椅 (wrong) ──────────────────────────
+// Replace the old "put down" button — whenever the ambient cameo swaps one of
+// the held items into a decoy, these two slide in from opposite screen edges
+// as the decoy's actual throw targets. Placeholder sprite files (taxi.png /
+// wheelchair.png) — swap in real art under sprites/stage2/ later; falls back
+// to an emoji + colored box until then (same fallback pattern as drawSpriteImg).
+const SIDE_TARGET_SIZE = 84;
+const SIDE_TARGET_HIT_R = 46;
+const SIDE_TARGET_ENTER_MS = 380;
+const SIDE_TARGET_EXIT_MS = 380;
+const SIDE_TARGET_IMG_CACHE = new Map<string, HTMLImageElement>();
+(["taxi.png", "wheelchair.png"] as const).forEach((file) => {
+  const img = new Image();
+  img.src = `${import.meta.env.BASE_URL}sprites/stage2/${file}`;
+  SIDE_TARGET_IMG_CACHE.set(file, img);
+});
 
 // ─── Web Audio SFX (synthesized — no audio assets) ──────────────────────────
 let audioCtx: AudioContext | null = null;
@@ -358,6 +418,16 @@ interface QueueItem {
   label: string;
 }
 
+// The two new throw targets that replace the old "put down" button — appear
+// together whenever a held slot is currently a decoy (see GameState.decoySwap).
+interface SideTargets {
+  taxiSide: "left" | "right"; // which edge the correct (taxi) target enters from this time
+  enterAt: number;
+  exitAt: number | null; // set once retracting; still drawn (animating out) until null
+  flashUntil: number;
+  flashGood: boolean;
+}
+
 interface GameState {
   status: "idle" | "playing" | "gameover";
   phase: "throw" | "bonus";
@@ -371,8 +441,19 @@ interface GameState {
   binReorderTriggered: boolean;
   flying: FlyingItem[];
   popups: Popup[];
-  queueItem: QueueItem;
-  aiming: boolean;
+  // Held items — BATCH_SIZE at a time, free pick; a slot goes null once thrown,
+  // and the whole batch refills together once every slot is empty.
+  queueBatch: (QueueItem | null)[];
+  // Purely decorative background cameo (see BG_DECOY_* consts / drawBgDecoy) —
+  // triggers decoySwap (below) when it appears, but otherwise unrelated to the
+  // throw batch — just a grandpa/gf silhouette peeking in from a screen edge.
+  bgDecoy: { def: DecoyDef; startedAt: number } | null;
+  bgDecoyNextAt: number;
+  // Set while the ambient cameo has swapped one held slot into a decoy —
+  // remembers the original item so it can be restored if never thrown.
+  decoySwap: { slot: number; def: DecoyDef; originalItem: QueueItem } | null;
+  sideTargets: SideTargets | null;
+  aimSlot: number | null; // index into queueBatch currently being aimed, or null
   aimStart: { x: number; y: number } | null;
   aimCurrent: { x: number; y: number } | null;
   sliceTrail: { x: number; y: number }[];
@@ -403,31 +484,68 @@ function spawnTrashItem(): QueueItem {
   return { kind: "trash", category: t.category, icon: t.icon, label: t.label };
 }
 
-function spawnQueueItem(): QueueItem {
-  if (Math.random() < DECOY_CHANCE) {
-    const d = pick(DECOYS);
-    return { kind: "decoy", icon: d.icon, label: d.label };
-  }
-  return spawnTrashItem();
+function spawnBatch(): QueueItem[] {
+  return Array.from({ length: BATCH_SIZE }, () => spawnTrashItem());
 }
 
-// Advances to the next queue item, arming a one-time "don't throw me" tooltip
-// the first time a decoy ever shows up.
-function nextQueueItem(gs: GameState, now: number) {
-  gs.decoyHintActive = false;
-  const item = spawnQueueItem();
-  gs.queueItem = item;
-  if (item.kind === "decoy" && !gs.decoyHintShownEver) {
+// If every slot in the current batch has been thrown, refill all of them at
+// once with a fresh batch of plain trash (decoys only ever appear via the
+// ambient-cameo swap-in — see triggerDecoySwap — never from a normal refill).
+function refillBatchIfEmpty(gs: GameState) {
+  if (gs.queueBatch.every((slot) => slot === null)) {
+    gs.queueBatch = spawnBatch();
+  }
+}
+
+// Called the moment the ambient cameo (bgDecoy) appears — picks a random
+// currently-held slot and temporarily turns it into that decoy, and slides in
+// the taxi/wheelchair throw targets. If every slot is currently empty (rare —
+// only right after the last item of a batch was just thrown) there's nothing
+// to swap, so the cameo just walks past as pure decoration this time.
+function triggerDecoySwap(gs: GameState, def: DecoyDef, now: number) {
+  const eligible = gs.queueBatch
+    .map((item, i) => ({ item, i }))
+    .filter((s): s is { item: QueueItem; i: number } => s.item !== null);
+  if (eligible.length === 0) return;
+  const { item: originalItem, i: slot } = pick(eligible);
+  gs.decoySwap = { slot, def, originalItem };
+  gs.queueBatch[slot] = { kind: "decoy", icon: def.icon, label: def.label };
+  gs.sideTargets = {
+    taxiSide: Math.random() < 0.5 ? "left" : "right",
+    enterAt: now,
+    exitAt: null,
+    flashUntil: 0,
+    flashGood: true,
+  };
+  if (!gs.decoyHintShownEver) {
     gs.decoyHintShownEver = true;
     gs.decoyHintActive = true;
     gs.decoyHintUntil = now + DECOY_HINT_MS;
   }
 }
 
+// Resolves the current decoy swap (thrown correctly, thrown incorrectly, or
+// the cameo simply walked off before the player acted) — restores the slot's
+// original item if it was never thrown, and starts the side targets' retract.
+function resolveDecoySwap(gs: GameState, now: number, reverted: boolean) {
+  if (
+    reverted &&
+    gs.decoySwap &&
+    gs.queueBatch[gs.decoySwap.slot]?.kind === "decoy"
+  ) {
+    gs.queueBatch[gs.decoySwap.slot] = gs.decoySwap.originalItem;
+  }
+  gs.decoySwap = null;
+  gs.decoyHintActive = false;
+  if (gs.sideTargets) gs.sideTargets.exitAt = now;
+}
+
 function makeBins(): Bin[] {
   // Clustered closer to center than before — no more drift/sway, so there's
   // no need for wide lanes to keep them from visually colliding mid-motion.
-  const lanes = [LW * 0.26, LW * 0.5, LW * 0.74];
+  // 三個垃圾桶的水平位置（0~1 為畫面寬度比例，0.5 是正中間）
+  // 數字越靠近 0.5 代表垃圾桶越集中；目前為 0.4 / 0.55 / 0.7。
+  const lanes = [LW * 0.28, LW * 0.5, LW * 0.72];
   const shuffled = [...BIN_TYPES].sort(() => Math.random() - 0.5);
   return shuffled.map((type, i) => ({
     type,
@@ -454,11 +572,15 @@ function initState(best: number): GameState {
     binReorderTriggered: false,
     flying: [],
     popups: [],
-    // First item is always plain trash — a decoy as the very first thing the
-    // player sees would need its "don't throw me" hint before they've thrown
-    // anything at all, which crowded straight into the swipe-to-throw hint.
-    queueItem: spawnTrashItem(),
-    aiming: false,
+    // First batch is always plain trash — decoys only ever appear via the
+    // ambient cameo swap-in, never at game start.
+    queueBatch: spawnBatch(),
+    bgDecoy: null,
+    // First cameo appears a few seconds in rather than instantly on game start.
+    bgDecoyNextAt: performance.now() + rng(2000, 5000),
+    decoySwap: null,
+    sideTargets: null,
+    aimSlot: null,
     aimStart: null,
     aimCurrent: null,
     sliceTrail: [],
@@ -484,8 +606,30 @@ function initState(best: number): GameState {
   };
 }
 
-const THROWER_Y = () => LH - 90;
-const BIN_OPEN_Y = () => LH * 0.27;
+// 控制角色（丟東西的那隻）的高度 — 只會畫出圖片上半部，且畫面上固定貼齊螢幕最底部。
+const THROWER_FULL_H = 128;
+// 手上拿著的垃圾／丟出去那一瞬間的起始高度 — 固定在角色頭頂上方一點的位置。
+const THROWER_ITEM_Y = () => LH - THROWER_FULL_H / 2 - 14;
+// x position of held-batch slot i (0..BATCH_SIZE-1), centered on the thrower.
+const batchSlotX = (i: number) =>
+  LW / 2 + (i - (BATCH_SIZE - 1) / 2) * BATCH_SLOT_GAP;
+// 角色目前實際畫出來的寬度（依圖片比例換算）— 力度 bar／放下按鈕都靠這個數字貼在角色兩側。
+const throwerDrawW = () =>
+  THROWER_IMG.complete && THROWER_IMG.naturalWidth > 0
+    ? (THROWER_FULL_H * THROWER_IMG.naturalWidth) / THROWER_IMG.naturalHeight
+    : THROWER_FULL_H;
+// ▼▼▼ 垃圾桶位置在這裡調整 ▼▼▼
+// 垃圾桶「開口」的高度 — 數字越大（0~1，相對畫面高度）垃圾桶整體越往下移。
+const BIN_OPEN_Y = () => LH * 0.29;
+// ▼▼▼ 計程車／輪椅滑進畫面的位置在這裡調整 ▼▼▼
+// 計程車／輪椅「停下來」的最終位置（0~1，相對畫面寬度）— 數字越小越靠左、越大越靠右，
+// 目前左邊停在 0.08、右邊停在 0.92；跟垃圾桶同一個高度（BIN_OPEN_Y）。
+const sideTargetRestX = (side: "left" | "right") =>
+  side === "left" ? LW * 0.08 : LW * 0.92;
+// 計程車／輪椅開始滑動的起點（畫面外）— 數字越大代表從越遠的地方滑進來，
+// 目前是以自身大小（SIDE_TARGET_SIZE）的 0.7 倍當作藏在畫面外的距離。
+const sideTargetOffX = (side: "left" | "right") =>
+  side === "left" ? -SIDE_TARGET_SIZE * 0.7 : LW + SIDE_TARGET_SIZE * 0.7;
 // Full physical canvas width expressed in logical units — LW alone can be
 // narrower than this in landscape (where GS is height-bound), leaving
 // letterbox strips on the sides that full-bleed fills need to cover too.
@@ -548,15 +692,18 @@ function update(gs: GameState, now: number, dtMs: number) {
   if (gs.phase === "throw" && gs.elapsed >= THROW_PHASE_MS) {
     gs.phase = "bonus";
     gs.flying = gs.flying.filter((f) => f.bonus);
-    gs.aiming = false;
+    gs.aimSlot = null;
     gs.aimStart = null;
     gs.aimCurrent = null;
     gs.truckActive = true;
-    gs.truckX = -160;
+    // 車頭朝左，所以改成從右邊開進來、往左邊開走——車身完全藏到畫面右邊外面才開始滑入
+    // （大小改變時這裡會自動跟著算）
+    gs.truckX = LW + truckDrawW() / 2 + 40;
     gs.bonusIntroUntil = now + BONUS_INTRO_MS;
     gs.bonusSpawnAt = gs.bonusIntroUntil + 250;
     gs.bonusBannerUntil = now + BONUS_BANNER_MS;
     playTruckHonk();
+    stopGame2Bgm(); // Bonus Time has its own Für Elise cue — avoid overlapping BGM
     if (!gs.bonusAudioStarted) {
       gs.bonusAudioStarted = true;
       startFurElise();
@@ -567,6 +714,7 @@ function update(gs: GameState, now: number, dtMs: number) {
     gs.status = "gameover";
     gs.phase = "throw";
     stopFurElise();
+    stopGame2Bgm();
     addRecord(2, gs.score);
     if (gs.score > gs.best) gs.best = gs.score;
     return;
@@ -606,10 +754,13 @@ function update(gs: GameState, now: number, dtMs: number) {
     }
   }
 
-  // Garbage truck intro slide
+  // Garbage truck intro slide — drives right-to-left (its cab faces left in the
+  // artwork) and only deactivates (which also opens the gate for Bonus Time
+  // items to start spawning) once its own right edge has fully cleared the
+  // left side of the screen, whatever size it's drawn at.
   if (gs.truckActive) {
-    gs.truckX += dt * 340;
-    if (gs.truckX > LW + 200) gs.truckActive = false;
+    gs.truckX -= dt * 340;
+    if (gs.truckX + truckDrawW() / 2 < -40) gs.truckActive = false;
   }
 
   // Bonus spawns — wait for the truck to fully drive off-screen before anything appears
@@ -641,39 +792,78 @@ function update(gs: GameState, now: number, dtMs: number) {
     if (it.bonus) it.vy += GRAVITY * dt; // straight-line throws ignore gravity; only Bonus Time arcs
     it.rot += it.vrot * dt;
 
-    if (!it.bonus) {
-      // Bin-landing check — any pass through the bin's opening counts (no arc, so no "descending" requirement)
-      if (it.y >= BIN_OPEN_Y() && it.y <= BIN_OPEN_Y() + BIN_H + 10) {
-        const hitBin = gs.bins.find(
-          (b) => Math.abs(b.x - it.x) <= BIN_W / 2 - 6,
+    if (
+      !it.bonus &&
+      it.y >= BIN_OPEN_Y() &&
+      it.y <= BIN_OPEN_Y() + BIN_H + 10
+    ) {
+      // Side targets (taxi = correct / wheelchair = wrong) — only relevant to
+      // a decoy while it's actually live (see triggerDecoySwap / SideTargets).
+      if (
+        it.kind === "decoy" &&
+        gs.sideTargets &&
+        gs.sideTargets.exitAt === null
+      ) {
+        const taxiX = sideTargetRestX(gs.sideTargets.taxiSide);
+        const wheelchairX = sideTargetRestX(
+          gs.sideTargets.taxiSide === "left" ? "right" : "left",
         );
-        if (hitBin) {
-          hitBin.flashUntil = now + 260;
-          hitBin.hitAt = now;
-          if (it.kind === "decoy") {
-            gs.score += SCORE_DECOY_PENALTY;
-            hitBin.flashGood = false;
-            gs.shakeUntil = now + 320;
-            gs.flashUntil = now + 220;
-            gs.flashColor = "#ff2020";
-            const decoy = DECOYS.find((d) => d.icon === it.icon);
-            gs.lastPenaltyMsg = decoy?.penaltyMsg ?? "慘叫！！";
-            addPopup(gs, it.x, it.y, `${SCORE_DECOY_PENALTY}`, "#ff4040");
-            playPenalty();
-          } else if (it.category === hitBin.type) {
-            gs.score += SCORE_CORRECT;
-            hitBin.flashGood = true;
-            addPopup(gs, it.x, it.y, `+${SCORE_CORRECT}`, "#4ade80");
-            playCorrect();
-          } else {
-            gs.score += SCORE_WRONG_BIN;
-            hitBin.flashGood = false;
-            addPopup(gs, it.x, it.y, `${SCORE_WRONG_BIN}`, "#f0a020");
-            playWrong();
-          }
+        if (Math.abs(it.x - taxiX) <= SIDE_TARGET_HIT_R) {
+          gs.sideTargets.flashUntil = now + 260;
+          gs.sideTargets.flashGood = true;
+          gs.score += SCORE_TAXI_CORRECT;
+          addPopup(gs, it.x, it.y, `+${SCORE_TAXI_CORRECT}`, "#4ade80");
+          playCorrect();
+          resolveDecoySwap(gs, now, false);
           gs.flying.splice(i, 1);
           continue;
         }
+        if (Math.abs(it.x - wheelchairX) <= SIDE_TARGET_HIT_R) {
+          gs.sideTargets.flashUntil = now + 260;
+          gs.sideTargets.flashGood = false;
+          gs.score += SCORE_DECOY_PENALTY;
+          gs.shakeUntil = now + 320;
+          gs.flashUntil = now + 220;
+          gs.flashColor = "#ff2020";
+          const decoy = DECOYS.find((d) => d.icon === it.icon);
+          gs.lastPenaltyMsg = decoy?.penaltyMsg ?? "慘叫！！";
+          addPopup(gs, it.x, it.y, `${SCORE_DECOY_PENALTY}`, "#ff4040");
+          playPenalty();
+          resolveDecoySwap(gs, now, false);
+          gs.flying.splice(i, 1);
+          continue;
+        }
+      }
+
+      // Bin-landing check — any pass through the bin's opening counts (no arc, so no "descending" requirement)
+      const hitBin = gs.bins.find((b) => Math.abs(b.x - it.x) <= BIN_W / 2 - 6);
+      if (hitBin) {
+        hitBin.flashUntil = now + 260;
+        hitBin.hitAt = now;
+        if (it.kind === "decoy") {
+          gs.score += SCORE_DECOY_PENALTY;
+          hitBin.flashGood = false;
+          gs.shakeUntil = now + 320;
+          gs.flashUntil = now + 220;
+          gs.flashColor = "#ff2020";
+          const decoy = DECOYS.find((d) => d.icon === it.icon);
+          gs.lastPenaltyMsg = decoy?.penaltyMsg ?? "慘叫！！";
+          addPopup(gs, it.x, it.y, `${SCORE_DECOY_PENALTY}`, "#ff4040");
+          playPenalty();
+          resolveDecoySwap(gs, now, false);
+        } else if (it.category === hitBin.type) {
+          gs.score += SCORE_CORRECT;
+          hitBin.flashGood = true;
+          addPopup(gs, it.x, it.y, `+${SCORE_CORRECT}`, "#4ade80");
+          playCorrect();
+        } else {
+          gs.score += SCORE_WRONG_BIN;
+          hitBin.flashGood = false;
+          addPopup(gs, it.x, it.y, `${SCORE_WRONG_BIN}`, "#f0a020");
+          playWrong();
+        }
+        gs.flying.splice(i, 1);
+        continue;
       }
     }
 
@@ -685,6 +875,31 @@ function update(gs: GameState, now: number, dtMs: number) {
 
   // Decoy tooltip times out if the player just sits on it without acting
   if (gs.decoyHintActive && now > gs.decoyHintUntil) gs.decoyHintActive = false;
+
+  // Ambient background cameo — also drives the decoy swap-in (see triggerDecoySwap).
+  if (gs.phase === "throw") {
+    if (gs.bgDecoy) {
+      if (now - gs.bgDecoy.startedAt > BG_DECOY_TOTAL_MS) {
+        gs.bgDecoy = null;
+        gs.bgDecoyNextAt = now + rng(BG_DECOY_GAP_MIN_MS, BG_DECOY_GAP_MAX_MS);
+        // Cameo left without the player throwing it — restore the original item.
+        if (gs.decoySwap) resolveDecoySwap(gs, now, true);
+      }
+    } else if (now >= gs.bgDecoyNextAt) {
+      const def = pick(DECOYS);
+      gs.bgDecoy = { def, startedAt: now };
+      triggerDecoySwap(gs, def, now);
+    }
+  }
+
+  // Side targets fully retract a moment after they start exiting, then are cleared.
+  if (
+    gs.sideTargets &&
+    gs.sideTargets.exitAt !== null &&
+    now - gs.sideTargets.exitAt > SIDE_TARGET_EXIT_MS
+  ) {
+    gs.sideTargets = null;
+  }
 
   // Popups aging
   gs.popups = gs.popups.filter((p) => now - p.born < 900);
@@ -786,7 +1001,7 @@ function binFrame(bin: Bin, now: number): 1 | 2 | 3 {
 // trajectory currently lines up with (same math as launch()) and pop its lid
 // open right away instead of waiting for the item to actually land.
 function predictedTargetBin(gs: GameState): Bin | null {
-  if (!gs.aiming || !gs.aimStart || !gs.aimCurrent) return null;
+  if (gs.aimSlot === null || !gs.aimStart || !gs.aimCurrent) return null;
   const dx = gs.aimCurrent.x - gs.aimStart.x;
   const dy = gs.aimCurrent.y - gs.aimStart.y;
   if (Math.hypot(dx, dy) < MIN_DRAG_DIST || dy > -MIN_DRAG_DIST * 0.5)
@@ -798,7 +1013,7 @@ function predictedTargetBin(gs: GameState): Bin | null {
     vx *= MAX_LAUNCH_SPEED / speed;
     vy *= MAX_LAUNCH_SPEED / speed;
   }
-  const t = (BIN_OPEN_Y() - (THROWER_Y() - 40)) / vy;
+  const t = (BIN_OPEN_Y() - THROWER_ITEM_Y()) / vy;
   const predictedX = LW / 2 + vx * t;
   let closest: Bin | null = null;
   let bestDist = Infinity;
@@ -819,7 +1034,7 @@ function drawBins(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
     const img = BIN_IMG_CACHE.get(`${BIN_COLOR[bin.type]}-${frame}`);
     const flashing = now < bin.flashUntil;
 
-    const drawW = 78;
+    const drawW = 100;
     const drawH =
       img && img.naturalWidth > 0
         ? Math.round((drawW * img.naturalHeight) / img.naturalWidth)
@@ -844,14 +1059,13 @@ function drawBins(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   }
 }
 
-// Draws a trash-item sprite centered at (0,0), scaled to fit within maxSize
-// while preserving its natural aspect ratio (sprites aren't all square).
-function drawTrashSprite(
+// Draws a sprite centered at (0,0), scaled to fit within maxSize while
+// preserving its natural aspect ratio (sprites aren't all square).
+function drawSpriteImg(
   ctx: CanvasRenderingContext2D,
-  key: string,
+  img: HTMLImageElement | undefined,
   maxSize: number,
 ) {
-  const img = TRASH_IMG_CACHE.get(key);
   if (img && img.complete && img.naturalWidth > 0) {
     const ratio = img.naturalWidth / img.naturalHeight;
     const dw = ratio > 1 ? maxSize : maxSize * ratio;
@@ -864,6 +1078,21 @@ function drawTrashSprite(
   }
 }
 
+function drawTrashSprite(
+  ctx: CanvasRenderingContext2D,
+  key: string,
+  maxSize: number,
+) {
+  drawSpriteImg(ctx, TRASH_IMG_CACHE.get(key), maxSize);
+}
+
+// ▼▼▼ 丟出去的物品大小在這裡調整 ▼▼▼
+// 一般丟出的垃圾／垃圾車小遊戲的垃圾／丟出的誘餌（老人、女友）— 數字越大物品越大。
+// 目前都是先前尺寸再放大 10%。
+const FLYING_TRASH_SIZE = 48;
+const FLYING_TRASH_BONUS_SIZE = 59;
+const FLYING_DECOY_SIZE = 79;
+
 function drawFlyingItem(ctx: CanvasRenderingContext2D, it: FlyingItem) {
   ctx.save();
   ctx.translate(it.x, it.y);
@@ -871,25 +1100,77 @@ function drawFlyingItem(ctx: CanvasRenderingContext2D, it: FlyingItem) {
   if (it.kind === "decoy") {
     ctx.shadowColor = "rgba(255,60,60,0.55)";
     ctx.shadowBlur = 16;
-    ctx.font = EMOJI_FONT(38);
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(it.icon, 0, 0);
+    const def = DECOYS.find((d) => d.icon === it.icon);
+    drawSpriteImg(
+      ctx,
+      def && DECOY_IMG_CACHE.get(def.flyImg),
+      FLYING_DECOY_SIZE,
+    );
   } else {
     if (it.bonus) {
       ctx.shadowColor = "rgba(0,0,0,0.7)";
       ctx.shadowBlur = 6;
     }
-    // Sized up to match Level 1's item proportions (ITEM_SIZE 44); Bonus
-    // Time's truck-thrown items go a step bigger still, as requested.
-    drawTrashSprite(ctx, it.icon, it.bonus ? 54 : 44);
+    drawTrashSprite(
+      ctx,
+      it.icon,
+      it.bonus ? FLYING_TRASH_BONUS_SIZE : FLYING_TRASH_SIZE,
+    );
   }
   ctx.restore();
 }
 
-// No trajectory preview — just a power bar so the player feels how hard they're pulling
+// Purely decorative background cameo — grandpa always walks on from the left,
+// gf always from the right (def.side). Not interactive, no hit-testing, just
+// atmosphere; drawn behind the gameplay elements in render(). Three phases:
+// slide in from off-screen (idleImg) → hold in place (idleImg) → slide back
+// out the same edge (mirrorImg, since it's now facing/walking the other way).
+function drawBgDecoy(
+  ctx: CanvasRenderingContext2D,
+  gs: GameState,
+  now: number,
+) {
+  if (!gs.bgDecoy) return;
+  const { def, startedAt } = gs.bgDecoy;
+  const age = now - startedAt;
+  const y = LH * 0.4;
+  const offX =
+    def.side === "right" ? LW + BG_DECOY_SIZE * 0.6 : -BG_DECOY_SIZE * 0.6;
+  const restX =
+    def.side === "right" ? LW - BG_DECOY_SIZE * 0.42 : BG_DECOY_SIZE * 0.42;
+
+  let x: number;
+  let imgFile: string;
+  if (age < BG_DECOY_ENTER_MS) {
+    const t = age / BG_DECOY_ENTER_MS;
+    const eased = 1 - (1 - t) * (1 - t);
+    x = offX + (restX - offX) * eased;
+    imgFile = def.idleImg;
+  } else if (age < BG_DECOY_ENTER_MS + BG_DECOY_HOLD_MS) {
+    x = restX;
+    imgFile = def.idleImg;
+  } else {
+    const t = Math.min(
+      1,
+      (age - BG_DECOY_ENTER_MS - BG_DECOY_HOLD_MS) / BG_DECOY_EXIT_MS,
+    );
+    const eased = t * t;
+    x = restX + (offX - restX) * eased;
+    imgFile = def.mirrorImg;
+  }
+
+  ctx.save();
+  ctx.translate(x, y);
+  drawSpriteImg(ctx, DECOY_IMG_CACHE.get(imgFile), BG_DECOY_SIZE);
+  ctx.restore();
+}
+
+// No trajectory preview — just a power bar so the player feels how hard they're pulling.
+// Sits right beside the character (on its left) instead of pinned to the
+// screen edge, and uses an opaque panel + bright border so it doesn't get
+// lost against the busy background video.
 function drawPowerBar(ctx: CanvasRenderingContext2D, gs: GameState) {
-  if (!gs.aiming || !gs.aimStart || !gs.aimCurrent) return;
+  if (gs.aimSlot === null || !gs.aimStart || !gs.aimCurrent) return;
   const dx = gs.aimCurrent.x - gs.aimStart.x;
   const dy = gs.aimCurrent.y - gs.aimStart.y;
   const dist = Math.hypot(dx, dy);
@@ -898,43 +1179,50 @@ function drawPowerBar(ctx: CanvasRenderingContext2D, gs: GameState) {
   const maxDist = MAX_LAUNCH_SPEED / DRAG_K;
   const ratio = Math.max(0, Math.min(1, dist / maxDist));
 
-  const barW = 16,
-    barH = 150;
-  const barX = 22;
-  const barBottom = THROWER_Y() + 6;
+  const barW = 18,
+    barH = 140;
+  const barX = LW / 2 - throwerDrawW() / 2 - barW - 14;
+  const barBottom = LH - 8;
   const barTop = barBottom - barH;
 
   ctx.save();
-  ctx.fillStyle = "rgba(0,0,0,0.4)";
+  // Opaque HUD-panel-style backing (matches the SCORE/TIME panels) instead of
+  // a faint translucent black box, so it reads clearly against any background.
+  ctx.shadowColor = "rgba(0,0,0,0.6)";
+  ctx.shadowBlur = 6;
+  ctx.fillStyle = "rgba(5,15,40,0.92)";
   drawRoundRect(ctx, barX, barTop, barW, barH, 8);
   ctx.fill();
-  ctx.strokeStyle = validDir ? "rgba(255,255,255,0.6)" : "rgba(255,80,80,0.85)";
-  ctx.lineWidth = 2;
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = validDir ? "#60a5fa" : "#ff5050";
+  ctx.lineWidth = 3;
   drawRoundRect(ctx, barX, barTop, barW, barH, 8);
   ctx.stroke();
 
   const fillH = Math.max(0, barH * ratio - 4);
   if (fillH > 0) {
     const grad = ctx.createLinearGradient(0, barBottom, 0, barTop);
-    grad.addColorStop(0, "#4ade80");
-    grad.addColorStop(0.6, "#f0c040");
-    grad.addColorStop(1, "#ff4040");
-    ctx.fillStyle = validDir ? grad : "rgba(255,80,80,0.55)";
-    drawRoundRect(ctx, barX + 2, barBottom - 2 - fillH, barW - 4, fillH, 6);
+    grad.addColorStop(0, "#22e07a");
+    grad.addColorStop(0.6, "#ffd23f");
+    grad.addColorStop(1, "#ff3030");
+    ctx.fillStyle = validDir ? grad : "rgba(255,80,80,0.7)";
+    drawRoundRect(ctx, barX + 3, barBottom - 3 - fillH, barW - 6, fillH, 6);
     ctx.fill();
   }
 
-  ctx.font = 'bold 11px "Cubic11", sans-serif';
+  ctx.font = 'bold 12px "Cubic11", sans-serif';
   ctx.fillStyle = validDir ? "#fff" : "#ffb0b0";
   ctx.textAlign = "center";
-  ctx.fillText(validDir ? "力道" : "↑ 需向上", barX + barW / 2, barTop - 10);
+  ctx.shadowColor = "rgba(0,0,0,0.7)";
+  ctx.shadowBlur = 4;
+  ctx.fillText(validDir ? "力道" : "↑ 需向上", barX + barW / 2, barTop - 12);
   ctx.restore();
 }
 
 // Thrower body — only the top half of the sprite is ever drawn (the source
 // rect stops at naturalHeight/2), as if the character stands behind the counter.
-// The body itself stays still; `bob` is only applied to the held-item float above it.
-const THROWER_FULL_H = 160;
+// The body itself stays still and sits flush with the very bottom of the
+// screen; `bob` is only applied to the held-item float above it.
 function drawThrower(
   ctx: CanvasRenderingContext2D,
   gs: GameState,
@@ -948,7 +1236,7 @@ function drawThrower(
     const drawW = (THROWER_FULL_H * img.naturalWidth) / img.naturalHeight;
     const halfDrawH = THROWER_FULL_H / 2;
     const halfSrcH = img.naturalHeight / 2;
-    const bottomY = THROWER_Y() + 40;
+    const bottomY = LH; // 貼齊畫面最底部
     ctx.drawImage(
       img,
       0,
@@ -961,77 +1249,162 @@ function drawThrower(
       halfDrawH,
     );
   }
-  if (!gs.aiming) {
+  // The 3 held slots — free-pick, so all non-empty, non-currently-aimed slots
+  // stay visible at once (the slot being actively dragged is hidden, same as
+  // the single-item version used to hide while aiming).
+  gs.queueBatch.forEach((item, i) => {
+    if (!item || gs.aimSlot === i) return;
     ctx.save();
-    if (gs.queueItem.kind === "decoy") {
+    if (item.kind === "decoy") {
+      // The interactive decoy (held here, then thrown) always uses its "-2"
+      // (already-mid-flail) sprite — the "-1" pose is reserved for the purely
+      // decorative background cameo (see drawBgDecoy), not this held preview.
       ctx.shadowColor = "rgba(255,60,60,0.65)";
       ctx.shadowBlur = 18;
-      ctx.font = EMOJI_FONT(40);
-      ctx.fillText(gs.queueItem.icon, cx, THROWER_Y() - 40 + bob);
+      const def = DECOYS.find((d) => d.icon === item.icon);
+      ctx.translate(batchSlotX(i), THROWER_ITEM_Y() + bob);
+      drawSpriteImg(ctx, def && DECOY_IMG_CACHE.get(def.flyImg), 68);
     } else {
-      ctx.translate(cx, THROWER_Y() - 40 + bob);
-      drawTrashSprite(ctx, gs.queueItem.icon, 50);
+      ctx.translate(batchSlotX(i), THROWER_ITEM_Y() + bob);
+      drawTrashSprite(ctx, item.icon, 46);
     }
     ctx.restore();
-  }
+  });
 }
 
-// Nudges the player to swipe, until they land their first throw — most people skip the idle-screen text
+// Nudges the player to swipe, until they land their first throw — most people skip the idle-screen text.
+// Sits above the character's head (which is now flush with the bottom of the
+// screen); disappears the moment the player touches down to aim (gs.aimSlot),
+// i.e. right as they start swiping, not just after a completed throw.
 function drawSwipeHint(
   ctx: CanvasRenderingContext2D,
   gs: GameState,
   now: number,
 ) {
-  if (gs.hasThrownOnce || gs.aiming) return;
+  if (gs.hasThrownOnce || gs.aimSlot !== null) return;
   const cx = LW / 2;
-  const bob = Math.abs(Math.sin(now / 320)) * 14;
+  const headTopY = LH - THROWER_FULL_H / 2;
+  const bob = Math.abs(Math.sin(now / 320)) * 10;
   ctx.save();
   ctx.globalAlpha = 0.9;
-  ctx.font = 'bold 30px "Cubic11", sans-serif';
+  ctx.font = 'bold 22px "Cubic11", sans-serif';
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillStyle = "#fff";
   ctx.shadowColor = "rgba(0,0,0,0.6)";
   ctx.shadowBlur = 6;
-  ctx.fillText("⬆", cx, THROWER_Y() + 55 - bob);
-  ctx.font = 'bold 13px "Cubic11", sans-serif';
-  ctx.fillText("向上滑動丟出去！", cx, THROWER_Y() + 74);
+  ctx.fillText("⬆", cx, headTopY - 40 - bob);
+  ctx.font = 'bold 11px "Cubic11", sans-serif';
+  ctx.fillText("向上滑動丟出去！", cx, headTopY + 25);
   ctx.restore();
 }
 
-// One-time tooltip the first time a decoy shows up, pointing at the put-down button
+// One-time tooltip the first time a decoy shows up, pointing from its held
+// slot toward whichever side the taxi (correct target) entered from.
 function drawDecoyHint(
   ctx: CanvasRenderingContext2D,
   gs: GameState,
   now: number,
 ) {
-  if (!gs.decoyHintActive) return;
+  if (!gs.decoyHintActive || !gs.decoySwap || !gs.sideTargets) return;
   const pulse = 1 + Math.sin(now / 160) * 0.05;
-  const bx = LW - 51,
-    by = THROWER_Y() - 30; // roughly where the DOM put-down button sits
+  const tipX = batchSlotX(gs.decoySwap.slot),
+    tipY = THROWER_ITEM_Y() - 60;
+  const bx = sideTargetRestX(gs.sideTargets.taxiSide),
+    by = BIN_OPEN_Y() + BIN_H / 2;
+
   ctx.save();
-  ctx.translate(LW / 2 + 10, THROWER_Y() - 90);
+  ctx.translate(tipX, tipY);
   ctx.scale(pulse, pulse);
   ctx.font = 'bold 13px "Cubic11", sans-serif';
   ctx.textAlign = "center";
   ctx.fillStyle = "#ffe08a";
   ctx.shadowColor = "rgba(0,0,0,0.7)";
   ctx.shadowBlur = 6;
-  ctx.fillText("⚠️ 別丟進桶子！", 0, 0);
-  ctx.fillText("按右邊「放下」鍵", 0, 16);
+  ctx.fillText("⚠️ 別丟進垃圾桶！", 0, 0);
+  ctx.fillText(
+    `丟到${gs.sideTargets.taxiSide === "left" ? "左邊" : "右邊"}計程車`,
+    0,
+    16,
+  );
   ctx.restore();
 
-  // Arrow pointing from the tooltip toward the button
+  // Arrow pointing from the tooltip toward the taxi
   ctx.save();
   ctx.strokeStyle = "#ffe08a";
   ctx.lineWidth = 2;
   ctx.setLineDash([4, 4]);
   ctx.beginPath();
-  ctx.moveTo(LW / 2 + 40, THROWER_Y() - 78);
+  ctx.moveTo(tipX, tipY + 12);
   ctx.lineTo(bx, by);
   ctx.stroke();
   ctx.setLineDash([]);
   ctx.restore();
+}
+
+// The two new throw targets that replace the old "put down" button — slide in
+// from opposite screen edges whenever a held slot is currently a decoy.
+// Placeholder art (taxi.png / wheelchair.png under sprites/stage2/) falls back
+// to an emoji + colored plate until the real sprites are dropped in.
+function drawSideTargets(
+  ctx: CanvasRenderingContext2D,
+  gs: GameState,
+  now: number,
+) {
+  const st = gs.sideTargets;
+  if (!st) return;
+
+  const drawOne = (
+    side: "left" | "right",
+    isTaxi: boolean,
+    file: string,
+    emoji: string,
+    plateColor: string,
+  ) => {
+    const restX = sideTargetRestX(side);
+    const offX = sideTargetOffX(side);
+    let x: number;
+    if (st.exitAt === null) {
+      const t = Math.min(1, (now - st.enterAt) / SIDE_TARGET_ENTER_MS);
+      x = offX + (restX - offX) * (1 - (1 - t) * (1 - t));
+    } else {
+      const t = Math.min(1, (now - st.exitAt) / SIDE_TARGET_EXIT_MS);
+      x = restX + (offX - restX) * (t * t);
+    }
+    const y = BIN_OPEN_Y() + BIN_H / 2;
+    const img = SIDE_TARGET_IMG_CACHE.get(file);
+    const flashing = now < st.flashUntil && st.flashGood === isTaxi;
+
+    ctx.save();
+    ctx.translate(x, y);
+    if (flashing) {
+      ctx.shadowColor = isTaxi ? "#4ade80" : "#ff3030";
+      ctx.shadowBlur = 22;
+    }
+    if (img && img.complete && img.naturalWidth > 0) {
+      drawSpriteImg(ctx, img, SIDE_TARGET_SIZE);
+    } else {
+      ctx.fillStyle = plateColor;
+      drawRoundRect(
+        ctx,
+        -SIDE_TARGET_SIZE / 2,
+        -SIDE_TARGET_SIZE / 2,
+        SIDE_TARGET_SIZE,
+        SIDE_TARGET_SIZE,
+        12,
+      );
+      ctx.fill();
+      ctx.font = EMOJI_FONT(SIDE_TARGET_SIZE * 0.55);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(emoji, 0, 0);
+    }
+    ctx.restore();
+  };
+
+  const wheelchairSide = st.taxiSide === "left" ? "right" : "left";
+  drawOne(st.taxiSide, true, "taxi.png", "🚕", "#f0c040");
+  drawOne(wheelchairSide, false, "wheelchair.png", "♿", "#5a6b8c");
 }
 
 // Bonus Time's gesture (drag-to-slice) isn't obvious from "click" alone — this
@@ -1091,18 +1464,29 @@ function drawPopups(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   }
 }
 
-const TRUCK_DRAW_H = 110;
+// ▼▼▼ 垃圾車來襲過場動畫在這裡調整 ▼▼▼
+// 垃圾車圖片高度 — 數字越大車子越大（寬度會依圖片比例自動等比縮放）。
+const TRUCK_DRAW_H = 300;
+// 垃圾車垂直位置，佔畫面高度的比例（0 為最上方、1 為最下方）；
+// 這個過場只會在 Bonus Time 開始、垃圾桶還沒畫出來時播放，所以不用擔心跟垃圾桶疊在一起。
+const TRUCK_Y_RATIO = 0.65;
+// 垃圾車目前實際畫出來的寬度（依圖片比例換算）— 進場/出場的位置都靠這個數字計算，
+// 車子放大時進出場位置會自動跟著變，才不會車身還沒完全開出畫面外小遊戲就開始了。
+const truckDrawW = () =>
+  TRUCK_IMG.complete && TRUCK_IMG.naturalWidth > 0
+    ? (TRUCK_DRAW_H * TRUCK_IMG.naturalWidth) / TRUCK_IMG.naturalHeight
+    : TRUCK_DRAW_H * 2.5;
 function drawTruck(ctx: CanvasRenderingContext2D, gs: GameState) {
   if (!gs.truckActive) return;
-  // Tucked above the play area so it never overlaps flying items
   const img = TRUCK_IMG;
   if (!img.complete || img.naturalWidth === 0) return;
   ctx.save();
-  const drawW = (TRUCK_DRAW_H * img.naturalWidth) / img.naturalHeight;
+  const drawW = truckDrawW();
+  const truckY = LH * TRUCK_Y_RATIO;
   ctx.drawImage(
     img,
     gs.truckX - drawW / 2,
-    45 - TRUCK_DRAW_H / 2,
+    truckY - TRUCK_DRAW_H / 2,
     drawW,
     TRUCK_DRAW_H,
   );
@@ -1178,9 +1562,9 @@ function drawHUD(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
     ctx.scale(pulse, pulse);
     ctx.font = 'bold 12px "Cubic11", sans-serif';
     ctx.textAlign = "center";
-    ctx.fillStyle = "#7dd3fc";
-    ctx.shadowColor = "#0284c7";
-    ctx.shadowBlur = 8;
+    ctx.fillStyle = "#fff";
+    ctx.shadowColor = "rgba(0,0,0,0.75)";
+    ctx.shadowBlur = 4;
     ctx.fillText(
       `🔄 垃圾桶即將換位置！ ${Math.ceil(timeToReorder / 1000)}s`,
       0,
@@ -1235,7 +1619,10 @@ function render(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
     ctx.translate(rng(-6, 6), rng(-6, 6));
   }
 
+  // Ambient background cameo drawn first so it sits behind the bins/thrower/items.
+  if (gs.phase === "throw") drawBgDecoy(ctx, gs, now);
   if (gs.phase === "throw") drawBins(ctx, gs, now);
+  if (gs.phase === "throw") drawSideTargets(ctx, gs, now);
   drawTruck(ctx, gs);
   for (const it of gs.flying) drawFlyingItem(ctx, it);
   if (gs.phase === "throw") {
@@ -1274,7 +1661,6 @@ export default function Level2({ onBack }: Level2Props) {
   const exitConfirmRef = useRef(false);
 
   const [status, setStatus] = useState<"idle" | "playing" | "gameover">("idle");
-  const [phase, setPhase] = useState<"throw" | "bonus">("throw");
   const [finalScore, setFinalScore] = useState(0);
   const [scoreDisplay, setScoreDisplay] = useState(0);
   const [timeLeftDisplay, setTimeLeftDisplay] = useState(TOTAL_MS);
@@ -1292,29 +1678,22 @@ export default function Level2({ onBack }: Level2Props) {
     gsRef.current.status = "playing";
     gsRef.current.lastFrameTs = performance.now();
     setStatus("playing");
-    setPhase("throw");
+    startGame2Bgm();
   }, []);
 
-  // Background music defaults to on. The <video> carries its own audio track;
-  // the `autoPlay` attribute alone can be blocked by the browser, so also
-  // kick play() explicitly once mounted (navigating in from the Lobby counts
-  // as the prior user gesture most browsers require for unmuted autoplay).
+  // Background audio is now the synthesized chiptune BGM (startGame2Bgm / Für
+  // Elise) rather than a video's own soundtrack. This still calls play() in
+  // case the background <video> is swapped back in later — a harmless no-op
+  // while it's commented out in favor of the static <img> below.
   useEffect(() => {
     videoRef.current?.play().catch(() => {});
   }, []);
-
-  // Bonus Time ("垃圾車模式") plays its own Für Elise cue — mute the background
-  // video's own audio track while it's active so the two don't overlap.
-  useEffect(() => {
-    if (videoRef.current) videoRef.current.muted = phase === "bonus";
-  }, [phase]);
 
   // ── Render loop ─────────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current!;
     const ctx = canvas.getContext("2d")!;
     let statusSent = gsRef.current.status;
-    let phaseSent = gsRef.current.phase;
     let lastHudSync = 0;
 
     const loop = (now: number) => {
@@ -1324,10 +1703,6 @@ export default function Level2({ onBack }: Level2Props) {
       if (gs.status === "playing" && !exitConfirmRef.current)
         update(gs, now, dt);
       render(ctx, gs, now);
-      if (gs.phase !== phaseSent) {
-        phaseSent = gs.phase;
-        setPhase(gs.phase);
-      }
       if (gs.status !== statusSent) {
         statusSent = gs.status;
         if (gs.status === "gameover") setFinalScore(gs.score);
@@ -1345,6 +1720,7 @@ export default function Level2({ onBack }: Level2Props) {
     return () => {
       cancelAnimationFrame(rafRef.current);
       stopFurElise();
+      stopGame2Bgm();
     };
   }, []);
 
@@ -1383,20 +1759,41 @@ export default function Level2({ onBack }: Level2Props) {
     };
   }, []);
 
+  // Free-pick: a pointer-down only starts aiming if it lands close enough to
+  // one of the held batch slots (whichever is non-empty and closest within range).
+  const hitTestBatchSlot = useCallback(
+    (gs: GameState, p: { x: number; y: number }) => {
+      let best: number | null = null;
+      let bestDist = Infinity;
+      gs.queueBatch.forEach((item, i) => {
+        if (!item) return;
+        const d = Math.hypot(p.x - batchSlotX(i), p.y - THROWER_ITEM_Y());
+        if (d <= BATCH_SLOT_HIT_R && d < bestDist) {
+          bestDist = d;
+          best = i;
+        }
+      });
+      return best;
+    },
+    [],
+  );
+
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       const gs = gsRef.current;
       if (gs.status !== "playing") return;
       const p = toLocal(e);
       if (gs.phase === "throw") {
-        gs.aiming = true;
+        const slot = hitTestBatchSlot(gs, p);
+        if (slot === null) return;
+        gs.aimSlot = slot;
         gs.aimStart = p;
         gs.aimCurrent = p;
       } else {
         gs.sliceTrail = [p];
       }
     },
-    [toLocal],
+    [toLocal, hitTestBatchSlot],
   );
 
   const onPointerMove = useCallback(
@@ -1404,7 +1801,7 @@ export default function Level2({ onBack }: Level2Props) {
       const gs = gsRef.current;
       if (gs.status !== "playing") return;
       const p = toLocal(e);
-      if (gs.phase === "throw" && gs.aiming) {
+      if (gs.phase === "throw" && gs.aimSlot !== null) {
         gs.aimCurrent = p;
       } else if (gs.phase === "bonus" && gs.sliceTrail.length) {
         gs.hasSlicedOnce = true;
@@ -1418,15 +1815,16 @@ export default function Level2({ onBack }: Level2Props) {
 
   const launch = useCallback(() => {
     const gs = gsRef.current;
-    if (!gs.aiming || !gs.aimStart || !gs.aimCurrent) {
-      gs.aiming = false;
+    if (gs.aimSlot === null || !gs.aimStart || !gs.aimCurrent) {
+      gs.aimSlot = null;
       return;
     }
+    const slot = gs.aimSlot;
     // Velocity follows the finger's motion (flick-style): current − start
     const dx = gs.aimCurrent.x - gs.aimStart.x;
     const dy = gs.aimCurrent.y - gs.aimStart.y;
     const dist = Math.hypot(dx, dy);
-    gs.aiming = false;
+    gs.aimSlot = null;
     if (dist < MIN_DRAG_DIST || dy > -MIN_DRAG_DIST * 0.5) {
       gs.aimStart = null;
       gs.aimCurrent = null;
@@ -1441,15 +1839,16 @@ export default function Level2({ onBack }: Level2Props) {
       vy *= MAX_LAUNCH_SPEED / speed;
     }
 
-    const q = gs.queueItem;
+    const q = gs.queueBatch[slot];
+    if (!q) return; // shouldn't happen — hitTestBatchSlot only selects non-empty slots
     gs.flying.push({
       id: gs.idCounter++,
       kind: q.kind,
       category: q.category,
       icon: q.icon,
       label: q.label,
-      x: LW / 2,
-      y: THROWER_Y() - 40,
+      x: batchSlotX(slot),
+      y: THROWER_ITEM_Y(),
       vx,
       vy,
       rot: 0,
@@ -1457,7 +1856,8 @@ export default function Level2({ onBack }: Level2Props) {
       bonus: false,
     });
     gs.hasThrownOnce = true;
-    nextQueueItem(gs, performance.now());
+    gs.queueBatch[slot] = null;
+    refillBatchIfEmpty(gs);
     gs.aimStart = null;
     gs.aimCurrent = null;
   }, []);
@@ -1468,27 +1868,6 @@ export default function Level2({ onBack }: Level2Props) {
     if (gs.phase === "throw") launch();
     else gs.sliceTrail = [];
   }, [launch]);
-
-  // Safe alternative to throwing — correct for decoys, penalized if used to dodge sorting real trash
-  const putDown = useCallback(() => {
-    const gs = gsRef.current;
-    if (gs.status !== "playing" || gs.phase !== "throw" || gs.aiming) return;
-    const q = gs.queueItem;
-    if (q.kind === "decoy") {
-      addPopup(gs, LW / 2, THROWER_Y() - 40, "安全放下 👋", "#4ade80");
-    } else {
-      gs.score += SCORE_PUTDOWN_WRONG;
-      addPopup(
-        gs,
-        LW / 2,
-        THROWER_Y() - 40,
-        `${SCORE_PUTDOWN_WRONG}`,
-        "#f0a020",
-      );
-      playWrong();
-    }
-    nextQueueItem(gs, performance.now());
-  }, []);
 
   // ── DOM HUD sizing (mirrors GameCanvas's panelBase/uiScale) ─────────────
   const uiScale = Math.min(1.6, Math.max(0.65, Math.min(vpW, vpH) / 480));
@@ -1520,10 +1899,11 @@ export default function Level2({ onBack }: Level2Props) {
         }
       `}</style>
 
-      {/* Background video — looping scene art behind the (transparent) canvas.
-          Unlike GameCanvas's silent video, this one carries the actual BGM
-          track and plays with sound by default. */}
-      <video
+      {/* Background scene art behind the (transparent) canvas — currently a static
+          <img> (below); the <video> version is kept here commented out in case
+          it's swapped back in. Audio is the separate synthesized BGM, not tied
+          to whichever of these is showing. */}
+      {/* <video
         ref={videoRef}
         src={game2BgSrc}
         autoPlay
@@ -1531,7 +1911,19 @@ export default function Level2({ onBack }: Level2Props) {
         playsInline
         style={{
           position: "absolute",
-          top: "30%",
+          top: "50%",
+          left: 0,
+          width: "100%",
+          height: "auto",
+          transform: "translateY(-50%)",
+          display: "block",
+        }}
+      /> */}
+      <img
+        src={game2BgSrc}
+        style={{
+          position: "absolute",
+          top: "50%",
           left: 0,
           width: "100%",
           height: "auto",
@@ -1827,36 +2219,6 @@ export default function Level2({ onBack }: Level2Props) {
         </button>
       )}
 
-      {/* Put-down button — the safe way to dispose of decoys; wrong on real trash costs points.
-          Positioned from the physical viewport height using GS so it still lines up with the
-          canvas-drawn thrower now that the canvas itself is no longer CSS-scaled. Uses the
-          button.gif art (label baked in) instead of a plain text button. */}
-      {status === "playing" && phase === "throw" && (
-        <button
-          onPointerDown={putDown}
-          style={{
-            position: "absolute",
-            right: 14,
-            top: vpH - 120 * GS,
-            zIndex: 20,
-            width: s(84),
-            background: "transparent",
-            border: "none",
-            padding: 0,
-            cursor: "pointer",
-            touchAction: "manipulation",
-            userSelect: "none",
-          }}
-        >
-          <img
-            src={`${import.meta.env.BASE_URL}sprites/stage2/button.gif`}
-            alt="放下"
-            draggable={false}
-            style={{ width: "100%", height: "auto", display: "block" }}
-          />
-        </button>
-      )}
-
       {/* Idle screen */}
       {status === "idle" && (
         <div
@@ -1875,28 +2237,33 @@ export default function Level2({ onBack }: Level2Props) {
             color: "#fff",
           }}
         >
-          <div style={{ fontSize: 46 }}>♻️</div>
+          {/* <div style={{ fontSize: 46 }}>♻️</div>
           <div style={{ fontSize: 26, fontWeight: 800, color: "#60a5fa" }}>
             垃圾分類王
-          </div>
-          <div
+          </div> */}
+          {/* 開頭規則說明圖 — 撐滿可用高度，寬度依圖片比例縮放，
+              左右多出的空間就露出外層的半透明黑底（不額外貼色底）。 */}
+          <button
+            onPointerDown={startGame}
             style={{
-              fontSize: 13,
-              color: "#cbd5e1",
-              lineHeight: 1.7,
-              maxWidth: 320,
+              height: "100vh",
+              // maxHeight: 420,
+              width: "auto",
+              // maxWidth: "94vw",
+              objectFit: "contain",
             }}
           >
-            🎯 向上滑動把垃圾丟進正確的桶子！
-            <br />
-            🙅 混進來的「老人家」「女友」別丟進桶子！
-            <br />
-            🚛 最後倒數垃圾車會來襲，手指劃過垃圾消滅它們拿 Bonus！
-          </div>
-          <div style={{ fontSize: 11, color: "#7a8bab" }}>
-            （放心，遊戲中會即時提示怎麼玩）
-          </div>
-          <button
+            <img
+              src={game2InfoSrc}
+              alt="遊戲說明"
+              draggable={false}
+              style={{
+                width: "100%",
+                height: "100%",
+              }}
+            />
+          </button>
+          {/* <button
             onPointerDown={startGame}
             style={{
               marginTop: 10,
@@ -1913,7 +2280,7 @@ export default function Level2({ onBack }: Level2Props) {
             }}
           >
             開始遊戲 →
-          </button>
+          </button> */}
         </div>
       )}
 
