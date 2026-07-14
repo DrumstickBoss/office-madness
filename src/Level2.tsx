@@ -208,6 +208,11 @@ DECOYS.forEach(({ idleImg, mirrorImg, flyImg }) => {
   });
 });
 
+// Chases the taxi/wheelchair off screen when it catches the wrong decoy —
+// see the chase branch in drawSideTargets.
+const POLICE_IMG = new Image();
+POLICE_IMG.src = `${import.meta.env.BASE_URL}sprites/stage2/police.png`;
+
 // ─── Ambient background cameo ───────────────────────────────────────────────
 // Purely decorative — grandpa always walks on from the left, gf always from the
 // right (def.side), during the throw phase. Not interactive, no score effect;
@@ -217,9 +222,7 @@ const BG_DECOY_ENTER_MS = 1200; // 老人／女友走進畫面的時間 — 數�
 // ▼▼▼ 老人／女友（連同計程車／輪椅，兩邊時機是綁在一起的）停留在畫面上的時間在這裡調整 ▼▼▼
 // 數字越大，停留越久、玩家有越多時間丟中計程車／輪椅。
 const BG_DECOY_HOLD_MS = 3200;
-const BG_DECOY_EXIT_MS = 550; // 走出畫面的時間 — 數字越大，退場走得越久
-const BG_DECOY_TOTAL_MS =
-  BG_DECOY_ENTER_MS + BG_DECOY_HOLD_MS + BG_DECOY_EXIT_MS;
+const BG_DECOY_EXIT_MS = 550; // 沒被丟中、自然走掉時的退場時間 — 數字越大，退場走得越久
 const BG_DECOY_GAP_MIN_MS = 5000;
 const BG_DECOY_GAP_MAX_MS = 10000;
 // 背景客串圖片大小 — 比手上丟的誘餌圖更大一點，純裝飾用。
@@ -241,6 +244,13 @@ const SIDE_TARGET_HIT_R = 46; // 判定「有丟中」的範圍半徑 — 通常
 // 兩邊看起來是「同時」出現、同時移出畫面，改 BG_DECOY_* 這裡也會跟著變。
 const SIDE_TARGET_ENTER_MS = BG_DECOY_ENTER_MS;
 const SIDE_TARGET_EXIT_MS = BG_DECOY_EXIT_MS;
+// ▼▼▼ 丟錯時，計程車／輪椅被 police 追逐的動畫在這裡調整 ▼▼▼
+// 被丟中的計程車或輪椅反向逃到「另一邊」畫面外的時間 — 數字越大，追逐跑得越慢。
+const SIDE_TARGET_CHASE_EXIT_MS = 1500;
+// police.png 的大小，以及它跟被追的計程車／輪椅之間的距離
+// （皆為 SIDE_TARGET_SIZE 的倍數）— 數字越大，police 越大／跟得越遠。
+const SIDE_TARGET_CHASE_POLICE_SIZE_RATIO = 0.85;
+const SIDE_TARGET_CHASE_GAP_RATIO = 0.95;
 // 一丟中（不管丟對或丟錯）就會立刻觸發退場，不用等到老人／女友自然走掉；
 // 沒丟中的話，退場時機改跟老人／女友的背景動畫綁在一起（見 update() 裡
 // 「老人／女友開始走出畫面」那段），不再有自己獨立的逾時時間。
@@ -487,6 +497,11 @@ interface SideTargets {
   // "occupied" one (DecoyDef.taxiImg / wheelchairImg) until it retracts.
   taxiOccupantImg: string | null;
   wheelchairOccupantImg: string | null;
+  // Set the instant a decoy is thrown into the WRONG target — that one (and
+  // only that one) flees to the opposite edge chased by police.png instead
+  // of retracting back out the near side (see the chase branch in
+  // drawSideTargets). The other, uninvolved target still retracts normally.
+  chasedTarget: "taxi" | "wheelchair" | null;
 }
 
 interface GameState {
@@ -508,7 +523,11 @@ interface GameState {
   // Purely decorative background cameo (see BG_DECOY_* consts / drawBgDecoy) —
   // triggers decoySwap (below) when it appears, but otherwise unrelated to the
   // throw batch — just a grandpa/gf silhouette peeking in from a screen edge.
-  bgDecoy: { def: DecoyDef; startedAt: number } | null;
+  // Once the throw resolves (hit, whether correct or wrong — see
+  // resolveDecoySwap) it's dismissed instantly (gs.bgDecoy set straight to
+  // null); exitAt is only used for the timed-out-untouched case, where it
+  // still walks back out the side it entered from.
+  bgDecoy: { def: DecoyDef; startedAt: number; exitAt: number | null } | null;
   bgDecoyNextAt: number;
   // Set while the ambient cameo has swapped one held slot into a decoy —
   // remembers the original item so it can be restored if never thrown.
@@ -591,6 +610,7 @@ function triggerDecoySwap(gs: GameState, def: DecoyDef, now: number) {
     flashTarget: null,
     taxiOccupantImg: null,
     wheelchairOccupantImg: null,
+    chasedTarget: null,
   };
   if (!gs.decoyHintShownEver) {
     gs.decoyHintShownEver = true;
@@ -599,12 +619,29 @@ function triggerDecoySwap(gs: GameState, def: DecoyDef, now: number) {
   }
 }
 
-// Resolves the current decoy swap (thrown correctly, thrown incorrectly, or
-// the cameo simply walked off before the player acted) — restores the slot's
-// original item if it was never thrown, and starts the side targets' retract.
-function resolveDecoySwap(gs: GameState, now: number, reverted: boolean) {
+// Immediately dismisses the ambient cameo (no exit animation) and arms the
+// gap timer for the next one — used whenever the throw actually resolves
+// (correct or wrong); only a timeout gets the gradual walk-out instead.
+function dismissBgDecoyNow(gs: GameState, now: number) {
+  gs.bgDecoy = null;
+  gs.bgDecoyNextAt = now + rng(BG_DECOY_GAP_MIN_MS, BG_DECOY_GAP_MAX_MS);
+}
+
+type DecoyResolution = "correct" | "wrong" | "timeout";
+
+// Resolves the current decoy swap — restores the slot's original item if it
+// was never thrown (timeout only), and starts the side targets' retract
+// (which target flees chased by police, if any, is set separately by the
+// caller — see SideTargets.chasedTarget). The ambient cameo (grandpa/gf)
+// itself just vanishes instantly on any resolved throw, correct or wrong;
+// only a timeout (never thrown) gets its normal walk-out-the-way-it-came.
+function resolveDecoySwap(
+  gs: GameState,
+  now: number,
+  outcome: DecoyResolution,
+) {
   if (
-    reverted &&
+    outcome === "timeout" &&
     gs.decoySwap &&
     gs.queueBatch[gs.decoySwap.slot]?.kind === "decoy"
   ) {
@@ -613,6 +650,11 @@ function resolveDecoySwap(gs: GameState, now: number, reverted: boolean) {
   gs.decoySwap = null;
   gs.decoyHintActive = false;
   if (gs.sideTargets) gs.sideTargets.exitAt = now;
+
+  if (gs.bgDecoy && gs.bgDecoy.exitAt === null) {
+    if (outcome === "timeout") gs.bgDecoy.exitAt = now;
+    else dismissBgDecoyNow(gs, now);
+  }
 }
 
 function makeBins(): Bin[] {
@@ -797,8 +839,11 @@ function checkThrowLanding(
         gs.lastPenaltyMsg = def?.penaltyMsg ?? "慘叫！！";
         addPopup(gs, it.x, it.y, `${SCORE_DECOY_PENALTY}`, "#ff4040");
         playPenalty();
+        // Wrong target — that one flees chased by police.png instead of
+        // retracting normally (see the chase branch in drawSideTargets).
+        gs.sideTargets.chasedTarget = hitTarget;
       }
-      resolveDecoySwap(gs, now, false);
+      resolveDecoySwap(gs, now, isCorrect ? "correct" : "wrong");
       return true;
     }
   }
@@ -823,7 +868,7 @@ function checkThrowLanding(
       gs.lastPenaltyMsg = decoy?.penaltyMsg ?? "慘叫！！";
       addPopup(gs, it.x, it.y, `${SCORE_DECOY_PENALTY}`, "#ff4040");
       playPenalty();
-      resolveDecoySwap(gs, now, false);
+      resolveDecoySwap(gs, now, "wrong");
     } else if (it.category === hitBin.type) {
       gs.score += SCORE_CORRECT;
       hitBin.flashGood = true;
@@ -1012,40 +1057,43 @@ function update(gs: GameState, now: number, dtMs: number) {
   if (gs.decoyHintActive && now > gs.decoyHintUntil) gs.decoyHintActive = false;
 
   // Ambient background cameo — also kicks off the decoy swap-in (see triggerDecoySwap).
-  // The taxi/wheelchair now retract in lockstep with it (see the "still holding,
-  // cameo just started walking back out" check below) instead of running on
-  // their own longer, independent timer.
+  // The taxi/wheelchair (and vice versa) retract in lockstep with it — see
+  // resolveDecoySwap, which sets bgDecoy.exitAt the instant either side
+  // resolves, instead of each running on its own independent timer.
   if (gs.phase === "throw") {
     if (gs.bgDecoy) {
-      if (now - gs.bgDecoy.startedAt > BG_DECOY_TOTAL_MS) {
-        gs.bgDecoy = null;
-        gs.bgDecoyNextAt = now + rng(BG_DECOY_GAP_MIN_MS, BG_DECOY_GAP_MAX_MS);
-      }
+      const exitStart =
+        gs.bgDecoy.exitAt ??
+        gs.bgDecoy.startedAt + BG_DECOY_ENTER_MS + BG_DECOY_HOLD_MS;
+      if (now - exitStart > BG_DECOY_EXIT_MS) dismissBgDecoyNow(gs, now);
     } else if (now >= gs.bgDecoyNextAt) {
       const def = pick(DECOYS);
-      gs.bgDecoy = { def, startedAt: now };
+      gs.bgDecoy = { def, startedAt: now, exitAt: null };
       triggerDecoySwap(gs, def, now);
     }
   }
 
   // Still holding a decoy once the ambient cameo itself starts walking back
-  // out (never got thrown in time) — restore the original item and start the
-  // side targets' retract right now, so everything exits together.
+  // out on its own natural schedule (never got thrown in time) — restore the
+  // original item and start the side targets' retract right now, so
+  // everything exits together.
   if (
     gs.decoySwap &&
     gs.bgDecoy &&
+    gs.bgDecoy.exitAt === null &&
     now - gs.bgDecoy.startedAt >= BG_DECOY_ENTER_MS + BG_DECOY_HOLD_MS
   ) {
-    resolveDecoySwap(gs, now, true);
+    resolveDecoySwap(gs, now, "timeout");
   }
 
-  // Side targets fully retract a moment after they start exiting, then are cleared.
-  if (
-    gs.sideTargets &&
-    gs.sideTargets.exitAt !== null &&
-    now - gs.sideTargets.exitAt > SIDE_TARGET_EXIT_MS
-  ) {
-    gs.sideTargets = null;
+  // Side targets fully retract a moment after they start exiting, then are
+  // cleared — waits the longer chase duration if one of them is being
+  // chased off by police (see SideTargets.chasedTarget).
+  if (gs.sideTargets && gs.sideTargets.exitAt !== null) {
+    const exitDur = gs.sideTargets.chasedTarget
+      ? SIDE_TARGET_CHASE_EXIT_MS
+      : SIDE_TARGET_EXIT_MS;
+    if (now - gs.sideTargets.exitAt > exitDur) gs.sideTargets = null;
   }
 
   // Popups aging
@@ -1103,7 +1151,11 @@ function drawFramedLines(
   y: number,
   lines: string[],
   fontSize: number,
+  options?: { textColor?: string; borderColor?: string },
 ) {
+  const textColor = options?.textColor ?? "#fff";
+  const borderColor = options?.borderColor ?? "#1e3a6e";
+
   ctx.font = `bold ${fontSize}px "Cubic11", sans-serif`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
@@ -1123,12 +1175,12 @@ function drawFramedLines(
   drawRoundRect(ctx, left, top, boxW, boxH, 8);
   ctx.fill();
   ctx.shadowBlur = 0;
-  ctx.strokeStyle = "#1e3a6e";
+  ctx.strokeStyle = borderColor;
   ctx.lineWidth = 2;
   drawRoundRect(ctx, left, top, boxW, boxH, 8);
   ctx.stroke();
 
-  ctx.fillStyle = "#fff";
+  ctx.fillStyle = textColor;
   ctx.shadowColor = "rgba(0,0,0,0.6)";
   ctx.shadowBlur = 3;
   lines.forEach((line, i) => {
@@ -1187,7 +1239,13 @@ function predictedTargetBin(gs: GameState): Bin | null {
       closest = bin;
     }
   }
-  return closest;
+  // 監測範圍改用「垃圾桶排列間距的一半」（對應 makeBins 的 0.28／0.5／0.72
+  // 車道位置，間距 0.22 * LW）—— 瞄準畫面中間時，預測位置一定會落在離它最近
+  // 的那個垃圾桶的這個範圍內（不會被旁邊的桶搶走），但又不會像用垃圾桶本身
+  // 寬度那樣窄到手一滑就整個不預覽；只有預測位置真的超出最左/右垃圾桶太遠
+  // （瞄得太歪）才不會預先開蓋。
+  const laneHalfGap = LW * 0.11;
+  return bestDist <= laneHalfGap ? closest : null;
 }
 
 function drawBins(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
@@ -1291,7 +1349,7 @@ function drawBgDecoy(
   now: number,
 ) {
   if (!gs.bgDecoy) return;
-  const { def, startedAt } = gs.bgDecoy;
+  const { def, startedAt, exitAt } = gs.bgDecoy;
   const age = now - startedAt;
   const y = LH * 0.4;
   const offX =
@@ -1301,7 +1359,14 @@ function drawBgDecoy(
 
   let x: number;
   let imgFile: string;
-  if (age < BG_DECOY_ENTER_MS) {
+  if (exitAt !== null) {
+    // Retracting on its own natural schedule (never got thrown in time) —
+    // walk back out the same side it entered from.
+    const t = Math.min(1, (now - exitAt) / BG_DECOY_EXIT_MS);
+    const eased = t * t;
+    x = restX + (offX - restX) * eased;
+    imgFile = def.mirrorImg;
+  } else if (age < BG_DECOY_ENTER_MS) {
     const t = age / BG_DECOY_ENTER_MS;
     const eased = 1 - (1 - t) * (1 - t);
     x = offX + (restX - offX) * eased;
@@ -1539,8 +1604,27 @@ function drawSideTargets(
   ) => {
     const restX = sideTargetRestX(side);
     const offX = sideTargetOffX(side);
+    // 圖片本身只畫了車頭朝左的方向；貼在螢幕左邊、或往右邊逃跑時都要水平鏡射，
+    // 車頭／人物才會朝向畫面中間（或逃跑方向），而不是朝外面。
+    const mirror = side === "left";
+    // 丟錯時，被丟中的這一個要反向逃到「另一邊」畫面外，而不是照原路退回近邊
+    // （見 checkThrowLanding 設定 SideTargets.chasedTarget）。
+    const isChased = st.exitAt !== null && st.chasedTarget === targetKind;
+
     let x: number;
-    if (st.exitAt === null) {
+    if (isChased) {
+      const chaseOffX = sideTargetOffX(side === "left" ? "right" : "left");
+      const dir = mirror ? 1 : -1;
+      const gap = SIDE_TARGET_SIZE * SIDE_TARGET_CHASE_GAP_RATIO;
+      // 多跑一段 gap 的距離（讓終點超出畫面外一點）——這樣被追的計程車／輪椅
+      // 停下來（t=1）時，落後 gap 距離的 police 也剛好完全跑出畫面，而不是還
+      // 停在畫面上動畫就結束了。
+      const totalTravel = chaseOffX - restX + dir * gap;
+      const t = Math.min(1, (now - st.exitAt!) / SIDE_TARGET_CHASE_EXIT_MS);
+      // 前段慢、後段快的加速曲線（比一般退場的 t*t 更明顯）。
+      const eased = t * t * t;
+      x = restX + totalTravel * eased;
+    } else if (st.exitAt === null) {
       const t = Math.min(1, (now - st.enterAt) / SIDE_TARGET_ENTER_MS);
       x = offX + (restX - offX) * (1 - (1 - t) * (1 - t));
     } else {
@@ -1553,11 +1637,23 @@ function drawSideTargets(
     // always the taxi — grandpa's correct target is the wheelchair.
     const flashing = now < st.flashUntil && st.flashTarget === targetKind;
 
+    if (isChased) {
+      const policeX =
+        x - (mirror ? 1 : -1) * SIDE_TARGET_SIZE * SIDE_TARGET_CHASE_GAP_RATIO;
+      ctx.save();
+      ctx.translate(policeX, y);
+      if (mirror) ctx.scale(-1, 1);
+      drawSpriteImg(
+        ctx,
+        POLICE_IMG,
+        SIDE_TARGET_SIZE * SIDE_TARGET_CHASE_POLICE_SIZE_RATIO,
+      );
+      ctx.restore();
+    }
+
     ctx.save();
     ctx.translate(x, y);
-    // 圖片本身只畫了車頭朝左的方向；貼在螢幕左邊時要水平鏡射，
-    // 車頭／人物才會朝向畫面中間，而不是朝外面。
-    if (side === "left") ctx.scale(-1, 1);
+    if (mirror) ctx.scale(-1, 1);
     if (flashing) {
       ctx.shadowColor = st.flashGood ? "#4ade80" : "#ff3030";
       ctx.shadowBlur = 22;
@@ -1791,13 +1887,48 @@ function drawHUD(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   }
 
   if (gs.lastPenaltyMsg && now < gs.flashUntil + 1600) {
-    ctx.save();
-    ctx.font = 'bold 14px "Cubic11", sans-serif';
-    ctx.textAlign = "center";
-    ctx.fillStyle = "#ffb0b0";
-    ctx.fillText(gs.lastPenaltyMsg, LW / 2, 96);
-    ctx.restore();
+    drawFramedLines(ctx, LW / 2, 96, [gs.lastPenaltyMsg], 14, {
+      textColor: "#ffb0b0",
+      borderColor: "#7a2020",
+    });
   }
+}
+
+// Result screen — canvas-drawn to match GameCanvas's (Level 1) drawGameOver
+// exactly: same dark overlay, text sizing formulas, colors, and layout.
+// Level 2 only ever ends by the clock running out, so there's no "GAME OVER"
+// (fail) branch — always the amber "時間到！" title.
+function drawGameOver(ctx: CanvasRenderingContext2D, gs: GameState) {
+  const fullW = fullLW();
+  ctx.save();
+  ctx.fillStyle = "rgba(0,0,0,0.75)";
+  ctx.fillRect(0, 0, fullW, LH);
+
+  const atLeastPhys = (minPx: number) => Math.ceil(minPx / GS);
+  const titleSize = Math.max(atLeastPhys(28), Math.round(LH * 0.057));
+  const scoreSize = Math.max(atLeastPhys(16), Math.round(LH * 0.034));
+  const promptSize = Math.max(atLeastPhys(13), Math.round(LH * 0.029));
+  const cx = fullW / 2;
+  const cy = LH / 2;
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "#f0c040";
+  ctx.font = `bold ${titleSize}px 'Cubic11', sans-serif`;
+  ctx.fillText("⏰ 時間到！", cx, cy - Math.round(LH * 0.114));
+
+  ctx.fillStyle = "#fff";
+  ctx.font = `bold ${scoreSize}px 'Cubic11', sans-serif`;
+  ctx.fillText(`最終分數：${gs.score}`, cx, cy - Math.round(LH * 0.043));
+
+  ctx.fillStyle = "#f0c040";
+  ctx.font = `${promptSize}px 'Cubic11', sans-serif`;
+  ctx.fillText(`最高分：${gs.best}`, cx, cy + Math.round(LH * 0.014));
+
+  ctx.fillStyle = "#4ade80";
+  ctx.font = `bold ${promptSize}px 'Cubic11', sans-serif`;
+  ctx.fillText("點擊畫面重新開始", cx, cy + Math.round(LH * 0.1));
+  ctx.restore();
 }
 
 function render(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
@@ -1847,6 +1978,8 @@ function render(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
     ctx.globalAlpha = 1;
   }
 
+  if (gs.status === "gameover") drawGameOver(ctx, gs);
+
   ctx.restore();
 }
 
@@ -1863,7 +1996,6 @@ export default function Level2({ onBack }: Level2Props) {
   const exitConfirmRef = useRef(false);
 
   const [status, setStatus] = useState<"idle" | "playing" | "gameover">("idle");
-  const [finalScore, setFinalScore] = useState(0);
   const [scoreDisplay, setScoreDisplay] = useState(0);
   const [timeLeftDisplay, setTimeLeftDisplay] = useState(TOTAL_MS);
   const [showExitConfirm, setShowExitConfirm] = useState(false);
@@ -1907,7 +2039,6 @@ export default function Level2({ onBack }: Level2Props) {
       render(ctx, gs, now);
       if (gs.status !== statusSent) {
         statusSent = gs.status;
-        if (gs.status === "gameover") setFinalScore(gs.score);
         setStatus(gs.status);
       }
       // Sync SCORE/TIME to the DOM HUD only every ~100ms to avoid excessive re-renders
@@ -1983,6 +2114,12 @@ export default function Level2({ onBack }: Level2Props) {
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       const gs = gsRef.current;
+      // Matches GameCanvas (Level 1) — clicking anywhere on the canvas while
+      // the result screen is showing restarts immediately.
+      if (gs.status === "gameover") {
+        startGame();
+        return;
+      }
       if (gs.status !== "playing") return;
       const p = toLocal(e);
       if (gs.phase === "throw") {
@@ -1998,7 +2135,7 @@ export default function Level2({ onBack }: Level2Props) {
         gs.netY = p.y;
       }
     },
-    [toLocal, hitTestBatchSlot],
+    [toLocal, hitTestBatchSlot, startGame],
   );
 
   const onPointerMove = useCallback(
@@ -2071,8 +2208,11 @@ export default function Level2({ onBack }: Level2Props) {
   const onPointerUp = useCallback(() => {
     const gs = gsRef.current;
     if (gs.status !== "playing") return;
+    // Bonus Time's net stays put at its last held position after release
+    // instead of vanishing — it only ever appears/moves again on the next
+    // pointerDown/Move, and stops being drawn once Bonus Time itself ends
+    // (drawNet is gated on gs.phase === "bonus").
     if (gs.phase === "throw") launch();
-    else gs.netActive = false;
   }, [launch]);
 
   // ── DOM HUD sizing (mirrors GameCanvas's panelBase/uiScale) ─────────────
@@ -2490,66 +2630,10 @@ export default function Level2({ onBack }: Level2Props) {
         </div>
       )}
 
-      {/* Gameover screen */}
-      {status === "gameover" && (
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            background: "rgba(8,16,36,0.94)",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 12,
-            fontFamily: "'Cubic11', sans-serif",
-            color: "#fff",
-          }}
-        >
-          <div style={{ fontSize: 24, fontWeight: 800, color: "#f0c040" }}>
-            時間到！
-          </div>
-          <div style={{ fontSize: 34, fontWeight: 800 }}>{finalScore} 分</div>
-          <div style={{ fontSize: 14, color: "#93c5fd" }}>
-            最高分：{Math.max(gsRef.current.best, finalScore)}
-          </div>
-          <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
-            <button
-              onPointerDown={startGame}
-              style={{
-                padding: "10px 22px",
-                background: "linear-gradient(135deg,#2f6fd6,#1c4fa8)",
-                color: "#fff",
-                border: "2px solid #60a5fa",
-                borderRadius: 10,
-                fontSize: 15,
-                fontWeight: 700,
-                cursor: "pointer",
-                fontFamily: "'Cubic11', sans-serif",
-                touchAction: "manipulation",
-              }}
-            >
-              再玩一次
-            </button>
-            <button
-              onPointerDown={onBack}
-              style={{
-                padding: "10px 22px",
-                background: "rgba(255,255,255,0.1)",
-                color: "#fff",
-                border: "2px solid rgba(255,255,255,0.3)",
-                borderRadius: 10,
-                fontSize: 15,
-                cursor: "pointer",
-                fontFamily: "'Cubic11', sans-serif",
-                touchAction: "manipulation",
-              }}
-            >
-              返回大廳
-            </button>
-          </div>
-        </div>
-      )}
+      {/* Gameover screen is now canvas-drawn (see drawGameOver) to match
+          GameCanvas (Level 1) exactly — clicking the canvas restarts, same as
+          Level 1's "點擊畫面重新開始" (see onPointerDown below); the persistent
+          top-left "返回大廳" button above already covers leaving. */}
     </div>
   );
 }
