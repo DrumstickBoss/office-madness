@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, useCallback } from "react";
 import { addRecord, getBestForLevel } from "./leaderboard";
 import { startGame2Bgm, stopGame2Bgm } from "./game2bgm";
-import game2BgSrc from "./assets/game2_bgm.jpg";
+import game2BgSrc from "./assets/game2_bgm.mp4";
 import game2InfoSrc from "./assets/game2_info.png";
 
 // ─── Canvas dimensions ────────────────────────────────────────────────────
@@ -28,8 +28,11 @@ let LH = typeof window !== "undefined" ? Math.round(CH / GS) : _p0 ? 700 : 480;
 
 // ─── Game tuning ───────────────────────────────────────────────────────────
 const THROW_PHASE_MS = 45_000;
-const BONUS_PHASE_MS = 15_000;
+// 垃圾車小遊戲（Bonus Time）的遊戲時間在這裡調整。
+const BONUS_PHASE_MS = 20_000;
 const TOTAL_MS = THROW_PHASE_MS + BONUS_PHASE_MS;
+// 垃圾車進場動畫的速度（px/s）— 數字越大，垃圾車開得越快、進場動畫越快結束。
+const TRUCK_SPEED = 480;
 const GRAVITY = 420; // px/s² — only applied to Bonus Time items; low enough that they arc up to mid-screen
 const DRAG_K = 4.2; // swipe px → launch velocity px/s (throws travel in a straight line)
 const MAX_LAUNCH_SPEED = 900;
@@ -37,15 +40,25 @@ const MIN_DRAG_DIST = 45;
 const SCORE_CORRECT = 100;
 const SCORE_WRONG_BIN = -30;
 const SCORE_DECOY_PENALTY = -500;
-const SCORE_TAXI_CORRECT = 100; // correctly throwing a decoy into the taxi
-const SCORE_SLICE = 50;
+const SCORE_DECOY_CORRECT = 100; // correctly throwing a decoy into its correct side target
+const SCORE_CATCH = 50; // Bonus Time — catching a falling item in the net
+// Bonus Time's catching net — size of the sprite, and how close an item's
+// center has to get to the net's center to count as caught.
+const NET_SIZE = 96;
+const NET_CATCH_R = 42;
 // Player holds BATCH_SIZE items at once (free pick, any order); once every
 // slot has been thrown, a fresh batch refills all of them at once.
 const BATCH_SIZE = 3;
-const BATCH_SLOT_GAP = 62; // horizontal spacing between the 3 held-item slots
+// ▼▼▼ 手上三個物品的大小在這裡調整 ▼▼▼
+const BATCH_SLOT_GAP = 74; // 三個物品彼此之間的水平間距 — 物品變大時可以跟著加大，避免互相重疊
+const BATCH_ITEM_SIZE = 58; // 一般垃圾物品的大小
+const BATCH_DECOY_SIZE = 82; // 誘餌（老人／女友）物品的大小
 const BATCH_SLOT_HIT_R = 34; // how close a pointer-down must land to a slot to start aiming it
 const BIN_W = 92;
 const BIN_H = 78;
+// Fast throws are stepped this many times per frame so they can't skip over
+// a bin/side-target's whole hitbox in a single jump (see checkThrowLanding).
+const BIN_COLLISION_SUBSTEPS = 4;
 const BIN_REORDER_AT_MS = 15_000; // bins slide off-screen once and re-enter in a shuffled order — their only motion now
 const BIN_REORDER_WARNING_MS = 4000; // small countdown hint before the reorder kicks in
 const BIN_TRANSITION_MS = 420;
@@ -151,7 +164,10 @@ interface DecoyDef {
   idleImg: string; // held/queued preview's fallback, and the ambient cameo's "enter + hold" pose
   mirrorImg: string; // ambient cameo's pose while walking back out (mirror of idleImg)
   flyImg: string; // shown once actually thrown
+  wheelchairImg: string; // shown in the wheelchair the instant anyone lands in it (correct or not)
+  taxiImg: string; // shown in the taxi the instant anyone lands in it (correct or not)
   side: "left" | "right"; // ambient cameo always enters/exits from this fixed edge
+  correctTarget: "taxi" | "wheelchair"; // which side target is the *correct* throw for this decoy
   label: string;
   penaltyMsg: string;
 }
@@ -161,7 +177,10 @@ const DECOYS: DecoyDef[] = [
     idleImg: "grandpa-1.png",
     mirrorImg: "grandpa-1-mirror.png",
     flyImg: "grandpa-2.png",
+    wheelchairImg: "wheelchair-grandpa.png",
+    taxiImg: "taxi-grandpa.png",
     side: "left",
+    correctTarget: "wheelchair", // 老人要送輪椅才對，丟到計程車反而扣分
     label: "迷路的老人家",
     penaltyMsg: "老人家：我還沒問完路啊！！",
   },
@@ -170,7 +189,10 @@ const DECOYS: DecoyDef[] = [
     idleImg: "gf-1.png",
     mirrorImg: "gf-1-mirror.png",
     flyImg: "gf-2.png",
+    wheelchairImg: "wheelchair-GF.png",
+    taxiImg: "taxi-gf.png",
     side: "right",
+    correctTarget: "taxi", // 女友要送計程車才對，丟到輪椅扣分
     label: "查勤的女友",
     penaltyMsg: "啪！！女友：你居然想丟掉我？！",
   },
@@ -191,31 +213,64 @@ DECOYS.forEach(({ idleImg, mirrorImg, flyImg }) => {
 // right (def.side), during the throw phase. Not interactive, no score effect;
 // just atmosphere behind the actual gameplay. Three phases: slide in (idleImg)
 // → hold in place (idleImg) → slide back out the same edge (mirrorImg).
-const BG_DECOY_ENTER_MS = 550;
-const BG_DECOY_HOLD_MS = 1900;
-const BG_DECOY_EXIT_MS = 550;
+const BG_DECOY_ENTER_MS = 1200; // 老人／女友走進畫面的時間 — 數字越大，進場走得越久
+// ▼▼▼ 老人／女友（連同計程車／輪椅，兩邊時機是綁在一起的）停留在畫面上的時間在這裡調整 ▼▼▼
+// 數字越大，停留越久、玩家有越多時間丟中計程車／輪椅。
+const BG_DECOY_HOLD_MS = 3200;
+const BG_DECOY_EXIT_MS = 550; // 走出畫面的時間 — 數字越大，退場走得越久
 const BG_DECOY_TOTAL_MS =
   BG_DECOY_ENTER_MS + BG_DECOY_HOLD_MS + BG_DECOY_EXIT_MS;
 const BG_DECOY_GAP_MIN_MS = 5000;
 const BG_DECOY_GAP_MAX_MS = 10000;
 // 背景客串圖片大小 — 比手上丟的誘餌圖更大一點，純裝飾用。
-const BG_DECOY_SIZE = 190;
+const BG_DECOY_SIZE = 170;
 
-// ─── Side targets: 計程車 (correct) / 輪椅 (wrong) ──────────────────────────
+// ─── Side targets: 計程車／輪椅 ──────────────────────────────────────────────
 // Replace the old "put down" button — whenever the ambient cameo swaps one of
 // the held items into a decoy, these two slide in from opposite screen edges
-// as the decoy's actual throw targets. Placeholder sprite files (taxi.png /
-// wheelchair.png) — swap in real art under sprites/stage2/ later; falls back
-// to an emoji + colored box until then (same fallback pattern as drawSpriteImg).
-const SIDE_TARGET_SIZE = 84;
-const SIDE_TARGET_HIT_R = 46;
-const SIDE_TARGET_ENTER_MS = 380;
-const SIDE_TARGET_EXIT_MS = 380;
+// as the decoy's actual throw targets. Which one is *correct* depends on the
+// specific decoy — see DecoyDef.correctTarget (老人要輪椅，女友要計程車).
+// Falls back to an emoji + colored box if a sprite file is missing (same
+// fallback pattern as drawSpriteImg).
+// ▼▼▼ 計程車／輪椅的大小在這裡調整 ▼▼▼
+const SIDE_TARGET_SIZE = 300; // 數字越大，計程車／輪椅圖片越大
+const SIDE_TARGET_HIT_R = 46; // 判定「有丟中」的範圍半徑 — 通常配合 SIDE_TARGET_SIZE 一起調整
+// ▼▼▼ 計程車／輪椅的進場幅度跟停留時間在這裡調整 ▼▼▼
+// 進場／退場動畫時間 — 直接沿用老人／女友走進、走出畫面的時間
+// （BG_DECOY_ENTER_MS／BG_DECOY_EXIT_MS），讓計程車／輪椅跟老人／女友
+// 兩邊看起來是「同時」出現、同時移出畫面，改 BG_DECOY_* 這裡也會跟著變。
+const SIDE_TARGET_ENTER_MS = BG_DECOY_ENTER_MS;
+const SIDE_TARGET_EXIT_MS = BG_DECOY_EXIT_MS;
+// 一丟中（不管丟對或丟錯）就會立刻觸發退場，不用等到老人／女友自然走掉；
+// 沒丟中的話，退場時機改跟老人／女友的背景動畫綁在一起（見 update() 裡
+// 「老人／女友開始走出畫面」那段），不再有自己獨立的逾時時間。
 const SIDE_TARGET_IMG_CACHE = new Map<string, HTMLImageElement>();
-(["taxi.png", "wheelchair.png"] as const).forEach((file) => {
+(
+  [
+    "taxi.png",
+    "wheelchair.png",
+    // Shown instead of the plain taxi/wheelchair for a beat right after a
+    // throw lands — the specific decoy sitting in it (see the taxi/wheelchair
+    // hit branch in checkThrowLanding() and DecoyDef.taxiImg/wheelchairImg).
+    "taxi-gf.png",
+    "taxi-grandpa.png",
+    "wheelchair-GF.png",
+    "wheelchair-grandpa.png",
+  ] as const
+).forEach((file) => {
   const img = new Image();
   img.src = `${import.meta.env.BASE_URL}sprites/stage2/${file}`;
   SIDE_TARGET_IMG_CACHE.set(file, img);
+});
+
+// ─── Bonus Time's catching net ──────────────────────────────────────────────
+// Faces the direction it's currently moving — net_right.png while dragging
+// right, net_left.png while dragging left (see GameState.netFacing).
+const NET_IMG_CACHE = new Map<string, HTMLImageElement>();
+(["net_left.png", "net_right.png"] as const).forEach((file) => {
+  const img = new Image();
+  img.src = `${import.meta.env.BASE_URL}sprites/stage2/${file}`;
+  NET_IMG_CACHE.set(file, img);
 });
 
 // ─── Web Audio SFX (synthesized — no audio assets) ──────────────────────────
@@ -265,7 +320,7 @@ const playCorrect = () => {
   playTone(1320, 0.12, "square", 0.1, 0.06);
 };
 const playWrong = () => playTone(220, 0.22, "sawtooth", 0.14);
-const playSlice = () => playTone(1100, 0.06, "triangle", 0.1);
+const playCatch = () => playTone(1100, 0.06, "triangle", 0.1);
 
 function playSlap() {
   const ctx = getAudioCtx();
@@ -421,11 +476,17 @@ interface QueueItem {
 // The two new throw targets that replace the old "put down" button — appear
 // together whenever a held slot is currently a decoy (see GameState.decoySwap).
 interface SideTargets {
-  taxiSide: "left" | "right"; // which edge the correct (taxi) target enters from this time
+  taxiSide: "left" | "right"; // which edge the taxi enters from this time (wheelchair takes the other)
   enterAt: number;
   exitAt: number | null; // set once retracting; still drawn (animating out) until null
   flashUntil: number;
   flashGood: boolean;
+  flashTarget: "taxi" | "wheelchair" | null; // which of the two was actually hit, for the flash above
+  // Set the instant any decoy lands in the taxi/wheelchair (whether or not
+  // that was the correct target for it) — swaps its empty sprite for the
+  // "occupied" one (DecoyDef.taxiImg / wheelchairImg) until it retracts.
+  taxiOccupantImg: string | null;
+  wheelchairOccupantImg: string | null;
 }
 
 interface GameState {
@@ -451,12 +512,23 @@ interface GameState {
   bgDecoyNextAt: number;
   // Set while the ambient cameo has swapped one held slot into a decoy —
   // remembers the original item so it can be restored if never thrown.
-  decoySwap: { slot: number; def: DecoyDef; originalItem: QueueItem } | null;
+  // Auto-reverts in lockstep with the ambient cameo's own exit (see update()),
+  // so the taxi/wheelchair always retract at the same time it walks off.
+  decoySwap: {
+    slot: number;
+    def: DecoyDef;
+    originalItem: QueueItem;
+    startedAt: number;
+  } | null;
   sideTargets: SideTargets | null;
   aimSlot: number | null; // index into queueBatch currently being aimed, or null
   aimStart: { x: number; y: number } | null;
   aimCurrent: { x: number; y: number } | null;
-  sliceTrail: { x: number; y: number }[];
+  // Bonus Time's catching net — only present while the pointer is held down.
+  netActive: boolean;
+  netX: number;
+  netY: number;
+  netFacing: "left" | "right"; // which sprite (net_left/net_right.png) to draw
   shakeUntil: number;
   flashUntil: number;
   flashColor: string;
@@ -476,7 +548,7 @@ interface GameState {
   warningPlayed: boolean;
   warningBeepSecond: number;
   binReorderBeepSecond: number; // countdown beep tracker for the "bins about to reorder" warning
-  hasSlicedOnce: boolean; // Bonus Time — whether the player has dragged/sliced yet
+  hasCaughtOnce: boolean; // Bonus Time — whether the player has used the net yet
 }
 
 function spawnTrashItem(): QueueItem {
@@ -508,7 +580,7 @@ function triggerDecoySwap(gs: GameState, def: DecoyDef, now: number) {
     .filter((s): s is { item: QueueItem; i: number } => s.item !== null);
   if (eligible.length === 0) return;
   const { item: originalItem, i: slot } = pick(eligible);
-  gs.decoySwap = { slot, def, originalItem };
+  gs.decoySwap = { slot, def, originalItem, startedAt: now };
   gs.queueBatch[slot] = { kind: "decoy", icon: def.icon, label: def.label };
   gs.sideTargets = {
     taxiSide: Math.random() < 0.5 ? "left" : "right",
@@ -516,6 +588,9 @@ function triggerDecoySwap(gs: GameState, def: DecoyDef, now: number) {
     exitAt: null,
     flashUntil: 0,
     flashGood: true,
+    flashTarget: null,
+    taxiOccupantImg: null,
+    wheelchairOccupantImg: null,
   };
   if (!gs.decoyHintShownEver) {
     gs.decoyHintShownEver = true;
@@ -583,7 +658,10 @@ function initState(best: number): GameState {
     aimSlot: null,
     aimStart: null,
     aimCurrent: null,
-    sliceTrail: [],
+    netActive: false,
+    netX: LW / 2,
+    netY: LH / 2,
+    netFacing: "right",
     shakeUntil: 0,
     flashUntil: 0,
     flashColor: "#ff3030",
@@ -596,7 +674,7 @@ function initState(best: number): GameState {
     bonusIntroUntil: 0,
     lastPenaltyMsg: null,
     hasThrownOnce: false,
-    hasSlicedOnce: false,
+    hasCaughtOnce: false,
     decoyHintShownEver: false,
     decoyHintActive: false,
     decoyHintUntil: 0,
@@ -621,15 +699,32 @@ const throwerDrawW = () =>
 // ▼▼▼ 垃圾桶位置在這裡調整 ▼▼▼
 // 垃圾桶「開口」的高度 — 數字越大（0~1，相對畫面高度）垃圾桶整體越往下移。
 const BIN_OPEN_Y = () => LH * 0.29;
+// 垃圾桶圖片實際畫出來的寬高（跟 drawBins 畫的大小一致）。垃圾桶圖片本身
+// 比 BIN_H 高很多，先前碰撞判定只算到 BIN_H 那麼高，導致垃圾桶下半部丟不中；
+// 這裡改成直接用圖片實際高度，讓碰撞範圍涵蓋整個垃圾桶。
+const BIN_DRAW_W = 100;
+const binDrawH = (): number => {
+  const img = BIN_IMG_CACHE.get(`${BIN_COLOR.general}-1`);
+  return img && img.naturalWidth > 0
+    ? Math.round((BIN_DRAW_W * img.naturalHeight) / img.naturalWidth)
+    : BIN_H + 16;
+};
 // ▼▼▼ 計程車／輪椅滑進畫面的位置在這裡調整 ▼▼▼
-// 計程車／輪椅「停下來」的最終位置（0~1，相對畫面寬度）— 數字越小越靠左、越大越靠右，
-// 目前左邊停在 0.08、右邊停在 0.92；跟垃圾桶同一個高度（BIN_OPEN_Y）。
+// 計程車／輪椅跟螢幕邊緣的距離（像素）— 數字越小，貼螢幕邊邊貼越緊；
+// 0 就是圖片邊緣剛好碰到螢幕邊界，可依需要再加大留一點空隙。
+const SIDE_TARGET_EDGE_GAP = -100;
+// 計程車／輪椅「停下來」的最終位置 — 固定貼齊左右邊緣（跟畫面寬度無關，兩種螢幕比例都一樣貼邊）。
 const sideTargetRestX = (side: "left" | "right") =>
-  side === "left" ? LW * 0.08 : LW * 0.92;
-// 計程車／輪椅開始滑動的起點（畫面外）— 數字越大代表從越遠的地方滑進來，
-// 目前是以自身大小（SIDE_TARGET_SIZE）的 0.7 倍當作藏在畫面外的距離。
+  side === "left"
+    ? SIDE_TARGET_SIZE / 2 + SIDE_TARGET_EDGE_GAP
+    : LW - SIDE_TARGET_SIZE / 2 - SIDE_TARGET_EDGE_GAP;
+// 計程車／輪椅一開始「藏起來」的位置 — 完全躲到畫面外（圖片整個看不見），
+// 這樣滑動時才會像「從畫面邊邊冒出來」，而不是憑空出現／消失。
 const sideTargetOffX = (side: "left" | "right") =>
-  side === "left" ? -SIDE_TARGET_SIZE * 0.7 : LW + SIDE_TARGET_SIZE * 0.7;
+  side === "left" ? -SIDE_TARGET_SIZE / 2 : LW + SIDE_TARGET_SIZE / 2;
+// 計程車／輪椅的垂直位置 — 數字越大，位置越往下移動。
+const SIDE_TARGET_Y_OFFSET = 130;
+const sideTargetY = () => BIN_OPEN_Y() + BIN_H / 2 + SIDE_TARGET_Y_OFFSET;
 // Full physical canvas width expressed in logical units — LW alone can be
 // narrower than this in landscape (where GS is height-bound), leaving
 // letterbox strips on the sides that full-bleed fills need to cover too.
@@ -650,6 +745,99 @@ function addPopup(
     color,
     born: performance.now(),
   });
+}
+
+// Checks whether a non-bonus flying item is currently overlapping a side
+// target (taxi/wheelchair) or a bin, and resolves the hit (score, sound,
+// popup, bin/side-target flash) if so. Doesn't remove `it` from gs.flying —
+// the caller does that based on the return value. Called once per sub-step
+// (see BIN_COLLISION_SUBSTEPS) so fast throws can't tunnel through a target.
+function checkThrowLanding(
+  gs: GameState,
+  it: FlyingItem,
+  now: number,
+): boolean {
+  // Side targets (計程車／輪椅) — only relevant to a decoy while it's live
+  // (see triggerDecoySwap / SideTargets). Uses its own Y position (sideTargetY)
+  // and a circular hit radius, independent of the bins' Y band below — their
+  // vertical position can be tuned separately (see SIDE_TARGET_Y_OFFSET).
+  // Which one is *correct* depends on the specific decoy (DecoyDef.correctTarget)
+  // — grandpa wants the wheelchair, gf wants the taxi.
+  if (it.kind === "decoy" && gs.sideTargets && gs.sideTargets.exitAt === null) {
+    const def = DECOYS.find((d) => d.icon === it.icon);
+    const ty = sideTargetY();
+    const taxiX = sideTargetRestX(gs.sideTargets.taxiSide);
+    const wheelchairX = sideTargetRestX(
+      gs.sideTargets.taxiSide === "left" ? "right" : "left",
+    );
+    const hitTaxi = Math.hypot(it.x - taxiX, it.y - ty) <= SIDE_TARGET_HIT_R;
+    const hitWheelchair =
+      !hitTaxi &&
+      Math.hypot(it.x - wheelchairX, it.y - ty) <= SIDE_TARGET_HIT_R;
+    if (hitTaxi || hitWheelchair) {
+      const hitTarget: "taxi" | "wheelchair" = hitTaxi ? "taxi" : "wheelchair";
+      const isCorrect = def?.correctTarget === hitTarget;
+      gs.sideTargets.flashUntil = now + 260;
+      gs.sideTargets.flashGood = isCorrect;
+      gs.sideTargets.flashTarget = hitTarget;
+      if (hitTarget === "wheelchair") {
+        gs.sideTargets.wheelchairOccupantImg = def?.wheelchairImg ?? null;
+      } else {
+        gs.sideTargets.taxiOccupantImg = def?.taxiImg ?? null;
+      }
+      if (isCorrect) {
+        gs.score += SCORE_DECOY_CORRECT;
+        addPopup(gs, it.x, it.y, `+${SCORE_DECOY_CORRECT}`, "#4ade80");
+        playCorrect();
+      } else {
+        gs.score += SCORE_DECOY_PENALTY;
+        gs.shakeUntil = now + 320;
+        gs.flashUntil = now + 220;
+        gs.flashColor = "#ff2020";
+        gs.lastPenaltyMsg = def?.penaltyMsg ?? "慘叫！！";
+        addPopup(gs, it.x, it.y, `${SCORE_DECOY_PENALTY}`, "#ff4040");
+        playPenalty();
+      }
+      resolveDecoySwap(gs, now, false);
+      return true;
+    }
+  }
+
+  // Bin-landing check — the whole bin counts, not just a narrow strip down its
+  // center. Y band now matches the bin sprite's actual drawn height (see
+  // binDrawH/drawBins) instead of the much-shorter BIN_H, so throws landing
+  // near the bottom of the bin register too.
+  const binTop = BIN_OPEN_Y() - 6;
+  if (it.y < binTop || it.y > binTop + binDrawH()) return false;
+  const hitBin = gs.bins.find((b) => Math.abs(b.x - it.x) <= BIN_W / 2);
+  if (hitBin) {
+    hitBin.flashUntil = now + 260;
+    hitBin.hitAt = now;
+    if (it.kind === "decoy") {
+      gs.score += SCORE_DECOY_PENALTY;
+      hitBin.flashGood = false;
+      gs.shakeUntil = now + 320;
+      gs.flashUntil = now + 220;
+      gs.flashColor = "#ff2020";
+      const decoy = DECOYS.find((d) => d.icon === it.icon);
+      gs.lastPenaltyMsg = decoy?.penaltyMsg ?? "慘叫！！";
+      addPopup(gs, it.x, it.y, `${SCORE_DECOY_PENALTY}`, "#ff4040");
+      playPenalty();
+      resolveDecoySwap(gs, now, false);
+    } else if (it.category === hitBin.type) {
+      gs.score += SCORE_CORRECT;
+      hitBin.flashGood = true;
+      addPopup(gs, it.x, it.y, `+${SCORE_CORRECT}`, "#4ade80");
+      playCorrect();
+    } else {
+      gs.score += SCORE_WRONG_BIN;
+      hitBin.flashGood = false;
+      addPopup(gs, it.x, it.y, `${SCORE_WRONG_BIN}`, "#f0a020");
+      playWrong();
+    }
+    return true;
+  }
+  return false;
 }
 
 // ─── Update ───────────────────────────────────────────────────────────────
@@ -759,7 +947,7 @@ function update(gs: GameState, now: number, dtMs: number) {
   // items to start spawning) once its own right edge has fully cleared the
   // left side of the screen, whatever size it's drawn at.
   if (gs.truckActive) {
-    gs.truckX -= dt * 340;
+    gs.truckX -= dt * TRUCK_SPEED; // 垃圾車進場速度在這裡調整（數字越大開得越快）
     if (gs.truckX + truckDrawW() / 2 < -40) gs.truckActive = false;
   }
 
@@ -787,81 +975,28 @@ function update(gs: GameState, now: number, dtMs: number) {
   // Flying items physics
   for (let i = gs.flying.length - 1; i >= 0; i--) {
     const it = gs.flying[i];
-    it.x += it.vx * dt;
-    it.y += it.vy * dt;
-    if (it.bonus) it.vy += GRAVITY * dt; // straight-line throws ignore gravity; only Bonus Time arcs
-    it.rot += it.vrot * dt;
-
-    if (
-      !it.bonus &&
-      it.y >= BIN_OPEN_Y() &&
-      it.y <= BIN_OPEN_Y() + BIN_H + 10
-    ) {
-      // Side targets (taxi = correct / wheelchair = wrong) — only relevant to
-      // a decoy while it's actually live (see triggerDecoySwap / SideTargets).
-      if (
-        it.kind === "decoy" &&
-        gs.sideTargets &&
-        gs.sideTargets.exitAt === null
-      ) {
-        const taxiX = sideTargetRestX(gs.sideTargets.taxiSide);
-        const wheelchairX = sideTargetRestX(
-          gs.sideTargets.taxiSide === "left" ? "right" : "left",
-        );
-        if (Math.abs(it.x - taxiX) <= SIDE_TARGET_HIT_R) {
-          gs.sideTargets.flashUntil = now + 260;
-          gs.sideTargets.flashGood = true;
-          gs.score += SCORE_TAXI_CORRECT;
-          addPopup(gs, it.x, it.y, `+${SCORE_TAXI_CORRECT}`, "#4ade80");
-          playCorrect();
-          resolveDecoySwap(gs, now, false);
-          gs.flying.splice(i, 1);
-          continue;
-        }
-        if (Math.abs(it.x - wheelchairX) <= SIDE_TARGET_HIT_R) {
-          gs.sideTargets.flashUntil = now + 260;
-          gs.sideTargets.flashGood = false;
-          gs.score += SCORE_DECOY_PENALTY;
-          gs.shakeUntil = now + 320;
-          gs.flashUntil = now + 220;
-          gs.flashColor = "#ff2020";
-          const decoy = DECOYS.find((d) => d.icon === it.icon);
-          gs.lastPenaltyMsg = decoy?.penaltyMsg ?? "慘叫！！";
-          addPopup(gs, it.x, it.y, `${SCORE_DECOY_PENALTY}`, "#ff4040");
-          playPenalty();
-          resolveDecoySwap(gs, now, false);
-          gs.flying.splice(i, 1);
-          continue;
+    if (it.bonus) {
+      it.x += it.vx * dt;
+      it.y += it.vy * dt;
+      it.vy += GRAVITY * dt; // straight-line throws ignore gravity; only Bonus Time arcs
+      it.rot += it.vrot * dt;
+    } else {
+      // Straight-line throws move in BIN_COLLISION_SUBSTEPS small hops instead
+      // of one big jump — a fast throw can easily cover more than a bin's
+      // width in a single frame, which let it fly straight through without
+      // ever landing exactly on a bin/side-target during the one frame checked.
+      const subDt = dt / BIN_COLLISION_SUBSTEPS;
+      let hit = false;
+      for (let s = 0; s < BIN_COLLISION_SUBSTEPS; s++) {
+        it.x += it.vx * subDt;
+        it.y += it.vy * subDt;
+        if (checkThrowLanding(gs, it, now)) {
+          hit = true;
+          break;
         }
       }
-
-      // Bin-landing check — any pass through the bin's opening counts (no arc, so no "descending" requirement)
-      const hitBin = gs.bins.find((b) => Math.abs(b.x - it.x) <= BIN_W / 2 - 6);
-      if (hitBin) {
-        hitBin.flashUntil = now + 260;
-        hitBin.hitAt = now;
-        if (it.kind === "decoy") {
-          gs.score += SCORE_DECOY_PENALTY;
-          hitBin.flashGood = false;
-          gs.shakeUntil = now + 320;
-          gs.flashUntil = now + 220;
-          gs.flashColor = "#ff2020";
-          const decoy = DECOYS.find((d) => d.icon === it.icon);
-          gs.lastPenaltyMsg = decoy?.penaltyMsg ?? "慘叫！！";
-          addPopup(gs, it.x, it.y, `${SCORE_DECOY_PENALTY}`, "#ff4040");
-          playPenalty();
-          resolveDecoySwap(gs, now, false);
-        } else if (it.category === hitBin.type) {
-          gs.score += SCORE_CORRECT;
-          hitBin.flashGood = true;
-          addPopup(gs, it.x, it.y, `+${SCORE_CORRECT}`, "#4ade80");
-          playCorrect();
-        } else {
-          gs.score += SCORE_WRONG_BIN;
-          hitBin.flashGood = false;
-          addPopup(gs, it.x, it.y, `${SCORE_WRONG_BIN}`, "#f0a020");
-          playWrong();
-        }
+      it.rot += it.vrot * dt;
+      if (hit) {
         gs.flying.splice(i, 1);
         continue;
       }
@@ -876,20 +1011,32 @@ function update(gs: GameState, now: number, dtMs: number) {
   // Decoy tooltip times out if the player just sits on it without acting
   if (gs.decoyHintActive && now > gs.decoyHintUntil) gs.decoyHintActive = false;
 
-  // Ambient background cameo — also drives the decoy swap-in (see triggerDecoySwap).
+  // Ambient background cameo — also kicks off the decoy swap-in (see triggerDecoySwap).
+  // The taxi/wheelchair now retract in lockstep with it (see the "still holding,
+  // cameo just started walking back out" check below) instead of running on
+  // their own longer, independent timer.
   if (gs.phase === "throw") {
     if (gs.bgDecoy) {
       if (now - gs.bgDecoy.startedAt > BG_DECOY_TOTAL_MS) {
         gs.bgDecoy = null;
         gs.bgDecoyNextAt = now + rng(BG_DECOY_GAP_MIN_MS, BG_DECOY_GAP_MAX_MS);
-        // Cameo left without the player throwing it — restore the original item.
-        if (gs.decoySwap) resolveDecoySwap(gs, now, true);
       }
     } else if (now >= gs.bgDecoyNextAt) {
       const def = pick(DECOYS);
       gs.bgDecoy = { def, startedAt: now };
       triggerDecoySwap(gs, def, now);
     }
+  }
+
+  // Still holding a decoy once the ambient cameo itself starts walking back
+  // out (never got thrown in time) — restore the original item and start the
+  // side targets' retract right now, so everything exits together.
+  if (
+    gs.decoySwap &&
+    gs.bgDecoy &&
+    now - gs.bgDecoy.startedAt >= BG_DECOY_ENTER_MS + BG_DECOY_HOLD_MS
+  ) {
+    resolveDecoySwap(gs, now, true);
   }
 
   // Side targets fully retract a moment after they start exiting, then are cleared.
@@ -904,49 +1051,21 @@ function update(gs: GameState, now: number, dtMs: number) {
   // Popups aging
   gs.popups = gs.popups.filter((p) => now - p.born < 900);
 
-  // Slice trail decay
-  if (gs.sliceTrail.length > 12)
-    gs.sliceTrail.splice(0, gs.sliceTrail.length - 12);
-}
-
-// ─── Slice detection (Bonus Time) ──────────────────────────────────────────
-function distToSegment(
-  px: number,
-  py: number,
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number,
-): number {
-  const dx = bx - ax,
-    dy = by - ay;
-  const lenSq = dx * dx + dy * dy;
-  let t = lenSq === 0 ? 0 : ((px - ax) * dx + (py - ay) * dy) / lenSq;
-  t = Math.max(0, Math.min(1, t));
-  const cx = ax + t * dx,
-    cy = ay + t * dy;
-  return Math.hypot(px - cx, py - cy);
-}
-
-function trySlice(
-  gs: GameState,
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number,
-  now: number,
-) {
-  for (let i = gs.flying.length - 1; i >= 0; i--) {
-    const it = gs.flying[i];
-    if (!it.bonus) continue;
-    if (distToSegment(it.x, it.y, ax, ay, bx, by) < 30) {
-      gs.score += SCORE_SLICE;
-      addPopup(gs, it.x, it.y, `+${SCORE_SLICE}`, "#f0c040");
-      playSlice();
-      gs.flying.splice(i, 1);
+  // Net catching (Bonus Time) — runs every frame the net is held down, so an
+  // item falling into a stationary net still gets caught even without the
+  // pointer itself moving.
+  if (gs.phase === "bonus" && gs.netActive) {
+    for (let i = gs.flying.length - 1; i >= 0; i--) {
+      const it = gs.flying[i];
+      if (!it.bonus) continue;
+      if (Math.hypot(it.x - gs.netX, it.y - gs.netY) < NET_CATCH_R) {
+        gs.score += SCORE_CATCH;
+        addPopup(gs, it.x, it.y, `+${SCORE_CATCH}`, "#f0c040");
+        playCatch();
+        gs.flying.splice(i, 1);
+      }
     }
   }
-  void now;
 }
 
 // ─── Drawing ────────────────────────────────────────────────────────────────
@@ -973,6 +1092,50 @@ function drawRoundRect(
 
 const EMOJI_FONT = (size: number) =>
   `${size}px "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif`;
+
+// Draws one or more lines of white text inside a HUD-panel-style framed box
+// (dark navy fill + blue border + drop shadow — matches the SCORE/TIME DOM
+// panel look) centered at (x, y). Used for the various canvas warning/hint
+// banners so they read consistently with the rest of the HUD.
+function drawFramedLines(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  lines: string[],
+  fontSize: number,
+) {
+  ctx.font = `bold ${fontSize}px "Cubic11", sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const padX = 14;
+  const padY = 8;
+  const lineGap = fontSize * 1.25;
+  const textW = Math.max(...lines.map((l) => ctx.measureText(l).width));
+  const boxW = textW + padX * 2;
+  const boxH = lines.length * lineGap + padY * 2 - (lineGap - fontSize);
+  const top = y - boxH / 2;
+  const left = x - boxW / 2;
+
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,0.7)";
+  ctx.shadowBlur = 10;
+  ctx.fillStyle = "rgba(5,15,40,0.92)";
+  drawRoundRect(ctx, left, top, boxW, boxH, 8);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = "#1e3a6e";
+  ctx.lineWidth = 2;
+  drawRoundRect(ctx, left, top, boxW, boxH, 8);
+  ctx.stroke();
+
+  ctx.fillStyle = "#fff";
+  ctx.shadowColor = "rgba(0,0,0,0.6)";
+  ctx.shadowBlur = 3;
+  lines.forEach((line, i) => {
+    ctx.fillText(line, x, top + padY + fontSize / 2 + i * lineGap);
+  });
+  ctx.restore();
+}
 
 function drawBackground(
   ctx: CanvasRenderingContext2D,
@@ -1034,11 +1197,8 @@ function drawBins(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
     const img = BIN_IMG_CACHE.get(`${BIN_COLOR[bin.type]}-${frame}`);
     const flashing = now < bin.flashUntil;
 
-    const drawW = 100;
-    const drawH =
-      img && img.naturalWidth > 0
-        ? Math.round((drawW * img.naturalHeight) / img.naturalWidth)
-        : BIN_H + 16;
+    const drawW = BIN_DRAW_W;
+    const drawH = binDrawH();
     const x = bin.x - drawW / 2;
     const y = BIN_OPEN_Y() - 6;
 
@@ -1249,11 +1409,14 @@ function drawThrower(
       halfDrawH,
     );
   }
-  // The 3 held slots — free-pick, so all non-empty, non-currently-aimed slots
-  // stay visible at once (the slot being actively dragged is hidden, same as
-  // the single-item version used to hide while aiming).
+  // The 3 held slots — free-pick, so all non-empty slots stay visible at
+  // once. The slot currently being aimed follows the pointer instead of
+  // disappearing, like pulling it back on a slingshot.
   gs.queueBatch.forEach((item, i) => {
-    if (!item || gs.aimSlot === i) return;
+    if (!item) return;
+    const isAiming = gs.aimSlot === i && gs.aimCurrent;
+    const px = isAiming ? gs.aimCurrent!.x : batchSlotX(i);
+    const py = isAiming ? gs.aimCurrent!.y : THROWER_ITEM_Y() + bob;
     ctx.save();
     if (item.kind === "decoy") {
       // The interactive decoy (held here, then thrown) always uses its "-2"
@@ -1262,11 +1425,15 @@ function drawThrower(
       ctx.shadowColor = "rgba(255,60,60,0.65)";
       ctx.shadowBlur = 18;
       const def = DECOYS.find((d) => d.icon === item.icon);
-      ctx.translate(batchSlotX(i), THROWER_ITEM_Y() + bob);
-      drawSpriteImg(ctx, def && DECOY_IMG_CACHE.get(def.flyImg), 68);
+      ctx.translate(px, py);
+      drawSpriteImg(
+        ctx,
+        def && DECOY_IMG_CACHE.get(def.flyImg),
+        BATCH_DECOY_SIZE,
+      );
     } else {
-      ctx.translate(batchSlotX(i), THROWER_ITEM_Y() + bob);
-      drawTrashSprite(ctx, item.icon, 46);
+      ctx.translate(px, py);
+      drawTrashSprite(ctx, item.icon, BATCH_ITEM_SIZE);
     }
     ctx.restore();
   });
@@ -1300,7 +1467,8 @@ function drawSwipeHint(
 }
 
 // One-time tooltip the first time a decoy shows up, pointing from its held
-// slot toward whichever side the taxi (correct target) entered from.
+// slot toward whichever side its *correct* target (DecoyDef.correctTarget)
+// entered from — grandpa wants the wheelchair, gf wants the taxi.
 function drawDecoyHint(
   ctx: CanvasRenderingContext2D,
   gs: GameState,
@@ -1310,22 +1478,30 @@ function drawDecoyHint(
   const pulse = 1 + Math.sin(now / 160) * 0.05;
   const tipX = batchSlotX(gs.decoySwap.slot),
     tipY = THROWER_ITEM_Y() - 60;
-  const bx = sideTargetRestX(gs.sideTargets.taxiSide),
-    by = BIN_OPEN_Y() + BIN_H / 2;
+  const correctTarget = gs.decoySwap.def.correctTarget;
+  const correctSide =
+    correctTarget === "taxi"
+      ? gs.sideTargets.taxiSide
+      : gs.sideTargets.taxiSide === "left"
+        ? "right"
+        : "left";
+  const bx = sideTargetRestX(correctSide),
+    by = sideTargetY();
 
   ctx.save();
   ctx.translate(tipX, tipY);
   ctx.scale(pulse, pulse);
-  ctx.font = 'bold 13px "Cubic11", sans-serif';
-  ctx.textAlign = "center";
-  ctx.fillStyle = "#ffe08a";
-  ctx.shadowColor = "rgba(0,0,0,0.7)";
-  ctx.shadowBlur = 6;
-  ctx.fillText("⚠️ 別丟進垃圾桶！", 0, 0);
-  ctx.fillText(
-    `丟到${gs.sideTargets.taxiSide === "left" ? "左邊" : "右邊"}計程車`,
+  drawFramedLines(
+    ctx,
     0,
-    16,
+    0,
+    [
+      "⚠️ 別丟進垃圾桶！",
+      `丟到${correctSide === "left" ? "左邊" : "右邊"}${
+        correctTarget === "taxi" ? "計程車" : "輪椅"
+      }`,
+    ],
+    13,
   );
   ctx.restore();
 
@@ -1335,7 +1511,7 @@ function drawDecoyHint(
   ctx.lineWidth = 2;
   ctx.setLineDash([4, 4]);
   ctx.beginPath();
-  ctx.moveTo(tipX, tipY + 12);
+  ctx.moveTo(tipX, tipY + 24);
   ctx.lineTo(bx, by);
   ctx.stroke();
   ctx.setLineDash([]);
@@ -1356,7 +1532,7 @@ function drawSideTargets(
 
   const drawOne = (
     side: "left" | "right",
-    isTaxi: boolean,
+    targetKind: "taxi" | "wheelchair",
     file: string,
     emoji: string,
     plateColor: string,
@@ -1371,14 +1547,19 @@ function drawSideTargets(
       const t = Math.min(1, (now - st.exitAt) / SIDE_TARGET_EXIT_MS);
       x = restX + (offX - restX) * (t * t);
     }
-    const y = BIN_OPEN_Y() + BIN_H / 2;
+    const y = sideTargetY();
     const img = SIDE_TARGET_IMG_CACHE.get(file);
-    const flashing = now < st.flashUntil && st.flashGood === isTaxi;
+    // Flashes whichever target was actually hit (see checkThrowLanding), not
+    // always the taxi — grandpa's correct target is the wheelchair.
+    const flashing = now < st.flashUntil && st.flashTarget === targetKind;
 
     ctx.save();
     ctx.translate(x, y);
+    // 圖片本身只畫了車頭朝左的方向；貼在螢幕左邊時要水平鏡射，
+    // 車頭／人物才會朝向畫面中間，而不是朝外面。
+    if (side === "left") ctx.scale(-1, 1);
     if (flashing) {
-      ctx.shadowColor = isTaxi ? "#4ade80" : "#ff3030";
+      ctx.shadowColor = st.flashGood ? "#4ade80" : "#ff3030";
       ctx.shadowBlur = 22;
     }
     if (img && img.complete && img.naturalWidth > 0) {
@@ -1403,50 +1584,70 @@ function drawSideTargets(
   };
 
   const wheelchairSide = st.taxiSide === "left" ? "right" : "left";
-  drawOne(st.taxiSide, true, "taxi.png", "🚕", "#f0c040");
-  drawOne(wheelchairSide, false, "wheelchair.png", "♿", "#5a6b8c");
+  drawOne(
+    st.taxiSide,
+    "taxi",
+    st.taxiOccupantImg ?? "taxi.png",
+    "🚕",
+    "#f0c040",
+  );
+  drawOne(
+    wheelchairSide,
+    "wheelchair",
+    st.wheelchairOccupantImg ?? "wheelchair.png",
+    "♿",
+    "#5a6b8c",
+  );
 }
 
-// Bonus Time's gesture (drag-to-slice) isn't obvious from "click" alone — this
-// animates a finger dragging back and forth with a trailing line, and keeps
-// showing until the player actually drags once, however long that takes.
-function drawSliceHint(
+// Draws the net at its current held position, facing whichever way it's
+// currently moving. Only ever called while gs.netActive is true.
+function drawNet(ctx: CanvasRenderingContext2D, gs: GameState) {
+  if (!gs.netActive) return;
+  const img = NET_IMG_CACHE.get(
+    gs.netFacing === "left" ? "net_left.png" : "net_right.png",
+  );
+  ctx.save();
+  ctx.translate(gs.netX, gs.netY);
+  ctx.shadowColor = "rgba(0,0,0,0.5)";
+  ctx.shadowBlur = 8;
+  drawSpriteImg(ctx, img, NET_SIZE);
+  ctx.restore();
+}
+
+// Bonus Time's gesture (press-and-hold, then move the net around) isn't
+// obvious from "click" alone — this animates the net sliding back and forth
+// until the player actually holds it down once, however long that takes.
+function drawNetHint(
   ctx: CanvasRenderingContext2D,
   gs: GameState,
   now: number,
 ) {
-  if (gs.hasSlicedOnce || now < gs.bonusIntroUntil) return;
-  const cycle = 1100;
+  if (gs.hasCaughtOnce || now < gs.bonusIntroUntil) return;
+  const cycle = 1400;
   const t = (now % cycle) / cycle; // 0..1
-  const swing = t < 0.5 ? t / 0.5 : 1 - (t - 0.5) / 0.5; // 0→1→0, so the hand slides out and back
+  const swing = t < 0.5 ? t / 0.5 : 1 - (t - 0.5) / 0.5; // 0→1→0, so the net slides out and back
   const startX = LW * 0.3,
     endX = LW * 0.7;
   const y = LH * 0.46;
   const x = startX + (endX - startX) * swing;
+  const facing = t < 0.5 ? "net_right.png" : "net_left.png";
 
   ctx.save();
   ctx.globalAlpha = 0.95;
-  ctx.strokeStyle = "rgba(255,255,255,0.75)";
-  ctx.lineWidth = 5;
-  ctx.lineCap = "round";
-  ctx.setLineDash([2, 10]);
-  ctx.beginPath();
-  ctx.moveTo(startX, y);
-  ctx.lineTo(x, y);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  ctx.font = EMOJI_FONT(36);
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
+  ctx.translate(x, y);
   ctx.shadowColor = "rgba(0,0,0,0.6)";
   ctx.shadowBlur = 8;
-  ctx.fillText("👆", x, y);
+  drawSpriteImg(ctx, NET_IMG_CACHE.get(facing), NET_SIZE * 0.8);
+  ctx.restore();
 
+  ctx.save();
   ctx.font = 'bold 15px "Cubic11", sans-serif';
+  ctx.textAlign = "center";
   ctx.fillStyle = "#fff";
+  ctx.shadowColor = "rgba(0,0,0,0.6)";
   ctx.shadowBlur = 6;
-  ctx.fillText("手指「劃過」垃圾來消滅它！", LW / 2, y - 42);
+  ctx.fillText("按住畫面移動網子，接住掉落的垃圾！", LW / 2, y - 54);
   ctx.restore();
 }
 
@@ -1518,7 +1719,7 @@ function drawBonusIntro(
   ctx.font = 'bold 15px "Cubic11", sans-serif';
   ctx.fillStyle = "#fff";
   ctx.shadowBlur = 6;
-  ctx.fillText("手指劃過垃圾消滅它們拿 Bonus！", 0, 20);
+  ctx.fillText("按住畫面移動網子接住垃圾拿 Bonus！", 0, 20);
   ctx.restore();
 }
 
@@ -1539,12 +1740,13 @@ function drawHUD(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
     ctx.save();
     ctx.translate(LW / 2, 56);
     ctx.scale(pulse, pulse);
-    ctx.font = 'bold 13px "Cubic11", sans-serif';
-    ctx.textAlign = "center";
-    ctx.fillStyle = "#ff8080";
-    ctx.shadowColor = "#ff2020";
-    ctx.shadowBlur = 8;
-    ctx.fillText(`⚠️ 垃圾車即將來襲！ ${Math.ceil(timeToBonus / 1000)}s`, 0, 0);
+    drawFramedLines(
+      ctx,
+      0,
+      0,
+      [`⚠️ 垃圾車即將來襲！ ${Math.ceil(timeToBonus / 1000)}s`],
+      13,
+    );
     ctx.restore();
   }
 
@@ -1560,15 +1762,12 @@ function drawHUD(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
     ctx.save();
     ctx.translate(LW / 2, 56);
     ctx.scale(pulse, pulse);
-    ctx.font = 'bold 12px "Cubic11", sans-serif';
-    ctx.textAlign = "center";
-    ctx.fillStyle = "#fff";
-    ctx.shadowColor = "rgba(0,0,0,0.75)";
-    ctx.shadowBlur = 4;
-    ctx.fillText(
-      `🔄 垃圾桶即將換位置！ ${Math.ceil(timeToReorder / 1000)}s`,
+    drawFramedLines(
+      ctx,
       0,
       0,
+      [`🔄 垃圾桶即將換位置！ ${Math.ceil(timeToReorder / 1000)}s`],
+      12,
     );
     ctx.restore();
   }
@@ -1631,7 +1830,10 @@ function render(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
     drawSwipeHint(ctx, gs, now);
     drawDecoyHint(ctx, gs, now);
   }
-  if (gs.phase === "bonus") drawSliceHint(ctx, gs, now);
+  if (gs.phase === "bonus") {
+    drawNetHint(ctx, gs, now);
+    drawNet(ctx, gs);
+  }
   drawPopups(ctx, gs, now);
   drawHUD(ctx, gs, now);
   ctx.restore();
@@ -1790,7 +1992,10 @@ export default function Level2({ onBack }: Level2Props) {
         gs.aimStart = p;
         gs.aimCurrent = p;
       } else {
-        gs.sliceTrail = [p];
+        gs.hasCaughtOnce = true;
+        gs.netActive = true;
+        gs.netX = p.x;
+        gs.netY = p.y;
       }
     },
     [toLocal, hitTestBatchSlot],
@@ -1803,11 +2008,12 @@ export default function Level2({ onBack }: Level2Props) {
       const p = toLocal(e);
       if (gs.phase === "throw" && gs.aimSlot !== null) {
         gs.aimCurrent = p;
-      } else if (gs.phase === "bonus" && gs.sliceTrail.length) {
-        gs.hasSlicedOnce = true;
-        const last = gs.sliceTrail[gs.sliceTrail.length - 1];
-        trySlice(gs, last.x, last.y, p.x, p.y, performance.now());
-        gs.sliceTrail.push(p);
+      } else if (gs.phase === "bonus" && gs.netActive) {
+        const dx = p.x - gs.netX;
+        if (dx > 2) gs.netFacing = "right";
+        else if (dx < -2) gs.netFacing = "left";
+        gs.netX = p.x;
+        gs.netY = p.y;
       }
     },
     [toLocal],
@@ -1866,7 +2072,7 @@ export default function Level2({ onBack }: Level2Props) {
     const gs = gsRef.current;
     if (gs.status !== "playing") return;
     if (gs.phase === "throw") launch();
-    else gs.sliceTrail = [];
+    else gs.netActive = false;
   }, [launch]);
 
   // ── DOM HUD sizing (mirrors GameCanvas's panelBase/uiScale) ─────────────
@@ -1903,7 +2109,7 @@ export default function Level2({ onBack }: Level2Props) {
           <img> (below); the <video> version is kept here commented out in case
           it's swapped back in. Audio is the separate synthesized BGM, not tied
           to whichever of these is showing. */}
-      {/* <video
+      <video
         ref={videoRef}
         src={game2BgSrc}
         autoPlay
@@ -1918,8 +2124,8 @@ export default function Level2({ onBack }: Level2Props) {
           transform: "translateY(-50%)",
           display: "block",
         }}
-      /> */}
-      <img
+      />
+      {/* <img
         src={game2BgSrc}
         style={{
           position: "absolute",
@@ -1930,7 +2136,7 @@ export default function Level2({ onBack }: Level2Props) {
           transform: "translateY(-50%)",
           display: "block",
         }}
-      />
+      /> */}
 
       {/* Canvas fills the real viewport pixel-for-pixel — no CSS upscaling, so it stays sharp */}
       <canvas

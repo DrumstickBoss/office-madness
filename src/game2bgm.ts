@@ -1,8 +1,9 @@
 // ─── Level 2 background music — a looping 8-bit/chiptune tune, synthesized live ──
-// with the Web Audio API (no audio assets). Same instrumentation as the Lobby's
-// bgm.ts (square-wave lead, triangle-wave bass, noise-channel hi-hat) for a
-// consistent house style, but its own faster, more driving progression to suit
-// an active sorting-under-pressure game.
+// with the Web Audio API (no audio assets). Deliberately a different mood from
+// the Lobby's bgm.ts — a mellower triangle-wave lead over a rounded sine bass
+// and a light off-beat shaker (instead of the Lobby's square-lead + driving
+// straight-8th hi-hat), so this reads as relaxed and cheerful rather than the
+// Lobby's brisk arcade feel.
 
 let audioCtx: AudioContext | null = null
 const getCtx = (): AudioContext | null => {
@@ -66,44 +67,52 @@ function playHatAt(ctx: AudioContext, dur: number, gain: number, startTime: numb
   activeNodes.push(src)
 }
 
-// ─── Composition: 8-bar loop, I–V–vi–iii in C major (C–G–Am–Em), 2 bars each ──
-// Same square/triangle/noise instrumentation as the first version, but a
-// different key, chord progression, and a syncopated (rest-on-the-offbeat)
-// rhythm instead of a straight walking arpeggio, so it reads as a distinct tune.
-const EIGHTH = 0.14
+// ─── Composition: 8-bar loop, C–Am–F–G (I–vi–IV–V) in C major, 2 bars each ──
+// A gentle, skipping rhythm — every other 8th note is a rest — instead of a
+// dense walking arpeggio, so it breathes more and feels like a relaxed stroll
+// rather than a drive.
+const EIGHTH = 0.2
 const BAR = EIGHTH * 8
 
-const G4 = 392.0, A4 = 440.0, B4 = 493.88,
-  C5 = 523.25, D5 = 587.33, E5 = 659.25, G5 = 783.99, A5 = 880.0, B5 = 987.77, C6 = 1046.5
+const F4 = 349.23, G4 = 392.0, A4 = 440.0, B4 = 493.88,
+  C5 = 523.25, D5 = 587.33, E5 = 659.25, F5 = 698.46, G5 = 783.99, A5 = 880.0, C6 = 1046.5
 
 const MELODY_BARS: number[][] = [
-  [C5, E5, G5, E5, C5, 0, G5, 0],        // C
-  [E5, G5, C6, G5, E5, 0, C5, 0],        // C
-  [G4, B4, D5, B4, G4, 0, D5, 0],        // G
-  [B4, D5, G5, D5, B4, 0, G4, 0],        // G
-  [A4, C5, E5, C5, A4, 0, E5, 0],        // Am
-  [C5, E5, A5, E5, C5, 0, A4, 0],        // Am
-  [E5, G5, B5, G5, E5, 0, B4, 0],        // Em
-  [G5, B5, E5, B5, G5, 0, G4, 0],        // Em — settles on G4, a V→I lead back into the C at the top of the loop
+  [C5, 0, E5, G5, 0, E5, C5, 0],          // C
+  [E5, 0, G5, C6, 0, G5, E5, 0],          // C
+  [A4, 0, C5, E5, 0, C5, A4, 0],          // Am
+  [C5, 0, E5, A5, 0, E5, C5, 0],          // Am
+  [F4, 0, A4, C5, 0, A4, F4, 0],          // F
+  [A4, 0, C5, F5, 0, C5, A4, 0],          // F
+  [G4, 0, B4, D5, 0, B4, G4, 0],          // G
+  [B4, 0, D5, G5, 0, D5, G4, 0],          // G — resolves back into C at the top of the loop
 ]
 
-const C3 = 130.81, G2 = 98.0, A2 = 110.0, E2 = 82.41
-const BASS_BARS = [C3, C3, G2, G2, A2, A2, E2, E2]
+const C3 = 130.81, A2 = 110.0, F2 = 87.31, G2 = 98.0
+const BASS_BARS = [C3, C3, A2, A2, F2, F2, G2, G2]
 
 interface Note { t: number; freq: number; dur: number; type: OscillatorType; gain: number }
-interface Loop { notes: Note[]; hats: number; loopLen: number }
+interface Loop { notes: Note[]; hatTimes: number[]; loopLen: number }
 
 function buildLoop(): Loop {
   const notes: Note[] = []
   MELODY_BARS.forEach((bar, bi) => {
     bar.forEach((freq, si) => {
-      if (freq > 0) notes.push({ t: bi * BAR + si * EIGHTH, freq, dur: EIGHTH * 0.7, type: 'square', gain: 0.07 })
+      // Triangle-wave lead (mellower/rounder than a square lead) over a sine-wave
+      // bass — softer and warmer than the Lobby's square-lead chiptune sound.
+      if (freq > 0) notes.push({ t: bi * BAR + si * EIGHTH, freq, dur: EIGHTH * 0.85, type: 'triangle', gain: 0.1 })
     })
   })
   BASS_BARS.forEach((freq, bi) => {
-    notes.push({ t: bi * BAR, freq, dur: BAR * 0.92, type: 'triangle', gain: 0.09 })
+    notes.push({ t: bi * BAR, freq, dur: BAR * 0.9, type: 'sine', gain: 0.11 })
   })
-  return { notes, hats: MELODY_BARS.length * 8, loopLen: BAR * MELODY_BARS.length }
+  // Light shaker on just the off-beats (the "and" of each beat) instead of a
+  // straight 8th hi-hat — keeps a gentle sway going without feeling driven.
+  const hatTimes: number[] = []
+  for (let bi = 0; bi < MELODY_BARS.length; bi++) {
+    for (let si = 0; si < 4; si++) hatTimes.push(bi * BAR + (si * 2 + 1) * EIGHTH)
+  }
+  return { notes, hatTimes, loopLen: BAR * MELODY_BARS.length }
 }
 
 const LOOP = buildLoop()
@@ -115,7 +124,7 @@ let bgmPlaying = false
 function scheduleCycle(ctx: AudioContext, cycleStart: number) {
   activeNodes = []
   for (const n of LOOP.notes) playToneAt(ctx, n.freq, n.dur, n.type, n.gain, cycleStart + n.t)
-  for (let i = 0; i < LOOP.hats; i++) playHatAt(ctx, 0.04, 0.025, cycleStart + i * EIGHTH)
+  for (const t of LOOP.hatTimes) playHatAt(ctx, 0.05, 0.018, cycleStart + t)
 }
 
 export function startGame2Bgm(): void {
