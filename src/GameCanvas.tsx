@@ -1,6 +1,15 @@
 import { useRef, useEffect, useState, useCallback } from "react";
 import { addRecord, getBestForLevel } from "./leaderboard";
 import game1BgSrc from "./assets/game1_bgm.mp4";
+import {
+  startGame1Bgm,
+  stopGame1Bgm,
+  playPhoneRing,
+  playSpecialCatch,
+  playWrongCatch,
+  playFreezeSound,
+  playPhoneCorrect,
+} from "./game1bgm";
 
 // ─── Canvas dimensions (mutable — updated on orientation change) ─────────────
 const isPortraitViewport = () =>
@@ -470,7 +479,7 @@ function initState(hiScore = 0, character: CharacterId = "bento"): GameState {
     phoneBoostUntil: 0,
     dailySpecial: [...SPECIAL_MEAL_FILES]
       .sort(() => Math.random() - 0.5)
-      .slice(0, 2),
+      .slice(0, 3),
     fat: false,
     fatUntil: 0,
     combo: 0,
@@ -697,6 +706,9 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
     gsRef.current.nextItemTime = now + 500;
     gsRef.current.nextCallTime = now + CALL_SPAWN_MS;
     gsRef.current.lastFrameTs = now;
+    // BGM：節奏從 120 BPM 線性加速到 200 BPM（60 秒後達到最快）
+    stopGame1Bgm();
+    startGame1Bgm(() => Math.min(128 + 47 * (gsRef.current.elapsed / GAME_DURATION_MS), 175));
     if (char === "shield")
       gsRef.current.nextShieldTime = now + SHIELD_RECHARGE_MS;
     setGameStatus("playing");
@@ -718,10 +730,12 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
         gs.score += 10;
         gs.phoneBoostUntil = performance.now() + PHONE_BOOST_MS;
       }
+      playPhoneCorrect();
     } else {
       gs.frozen = true;
       gs.frozenUntil = performance.now() + FREEZE_MS;
       gs.frozenMsg = "可惡！被詐騙了！！";
+      playFreezeSound();
     }
   }, []);
 
@@ -736,11 +750,13 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
     if (call.type === "scam") {
       if (gs.character === "phone")
         gs.phoneBoostUntil = performance.now() + PHONE_BOOST_MS;
+      playPhoneCorrect();
     } else {
       gs.score += SCORE_LEGIT_MISS;
       gs.frozen = true;
       gs.frozenUntil = performance.now() + FREEZE_MS;
       gs.frozenMsg = `${call.caller}：竟敢掛我電話！？`;
+      playFreezeSound();
     }
   }, []);
 
@@ -831,6 +847,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
           }
           gs.combo++;
           if (gs.combo > gs.maxCombo) gs.maxCombo = gs.combo;
+          playSpecialCatch();
         } else {
           // Wrong meal — deduct 10 pts, fat & slow (shield can block)
           if (gs.character === "shield" && gs.shields > 0) {
@@ -844,6 +861,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
               gs.comboActive = false;
             }
             gs.combo = 0;
+            playWrongCatch();
           }
         }
         if (gs.score > gs.hiScore) gs.hiScore = gs.score;
@@ -881,6 +899,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
         resolved: false,
       });
       gs.callsDirty = true;
+      playPhoneRing();
     }
 
     // Resolve timed-out calls
@@ -896,6 +915,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
           gs.frozen = true;
           gs.frozenUntil = now + FREEZE_MS;
           gs.frozenMsg = `${call.caller}：竟敢掛我電話！？`;
+          playFreezeSound();
         }
         // Scam timed out = scammer gave up, no penalty
       }
@@ -1041,7 +1061,10 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
       if (gs.status !== statusSent) {
         statusSent = gs.status;
         setGameStatus(gs.status);
-        if (gs.status === "gameover") setCalls([]);
+        if (gs.status === "gameover") {
+          setCalls([]);
+          stopGame1Bgm();
+        }
       }
 
       // Sync HUD display every ~100ms to avoid excessive re-renders
@@ -1060,8 +1083,27 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
     };
 
     rafRef.current = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(rafRef.current);
+    return () => {
+      cancelAnimationFrame(rafRef.current);
+      stopGame1Bgm();
+    };
   }, [update, render]);
+
+  // ── 電話持續震動：有來電時一直震動，直到電話消失 ─────────────────────────
+  useEffect(() => {
+    const canVibrate = typeof navigator !== "undefined" && !!navigator.vibrate;
+    if (!canVibrate || calls.length === 0) {
+      if (canVibrate) try { navigator.vibrate(0) } catch {}
+      return;
+    }
+    const pulse = () => { try { navigator.vibrate([150, 180]) } catch {} };
+    pulse();
+    const id = setInterval(pulse, 330);
+    return () => {
+      clearInterval(id);
+      try { navigator.vibrate(0) } catch {}
+    };
+  }, [calls.length > 0]);
 
   // ── Orientation / resize ──────────────────────────────────────────────────
   useEffect(() => {
@@ -1374,9 +1416,9 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
                       <div
                         key={sf}
                         style={{
-                          width: s(44),
-                          height: s(44),
-                          borderRadius: s(8),
+                          width: s(60),
+                          height: s(60),
+                          borderRadius: s(10),
                           border: "2px solid #f0c040",
                           background: "rgba(240,192,64,0.12)",
                           display: "flex",
@@ -1389,8 +1431,8 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
                           src={img.src}
                           alt=""
                           style={{
-                            width: s(36),
-                            height: s(36),
+                            width: s(50),
+                            height: s(50),
                             imageRendering: "pixelated",
                           }}
                         />
