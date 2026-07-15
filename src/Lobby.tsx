@@ -194,6 +194,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
 
   return (
     <div
+      onPointerDown={() => setSelectedLevel(null)}
       style={{
         position: "relative",
         width: "100%",
@@ -240,6 +241,12 @@ export default function Lobby({ onPlay }: LobbyProps) {
           0%, 100% { opacity: 1;   transform: scale(1);    }
           50%      { opacity: 0.75; transform: scale(1.14); }
         }
+        @keyframes startBtnPulse {
+          0%, 100% { box-shadow: 0 4px 14px rgba(240,160,32,0.45), 0 0 0 0 rgba(255,214,0,0.55); }
+          50%      { box-shadow: 0 4px 22px rgba(240,160,32,0.75), 0 0 0 9px rgba(255,214,0,0); }
+        }
+        .start-btn { transition: transform 120ms ease; }
+        .start-btn:active { transform: scale(0.93); }
       `}</style>
 
       {/* Level buttons — positioned over the circles in the background art */}
@@ -249,7 +256,8 @@ export default function Lobby({ onPlay }: LobbyProps) {
         return (
           <div
             key={level.id}
-            onPointerDown={() => {
+            onPointerDown={(e) => {
+              e.stopPropagation();
               if (level.unlocked) setSelectedLevel(level.id);
             }}
             style={{
@@ -350,6 +358,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
           viewport's own top edge (not the background's box), so it's never
           covered by the level nodes and can never exceed the screen. */}
       <div
+        onPointerDown={(e) => e.stopPropagation()}
         style={{
           position: "absolute",
           top: 0,
@@ -359,7 +368,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          padding: `${Math.round(10 * scale)}px ${Math.round(16 * scale)}px`,
+          padding: `${Math.round(20 * scale)}px ${Math.round(30 * scale)}px`,
           background:
             "linear-gradient(180deg,rgba(0,0,0,0.7) 0%,rgba(0,0,0,0) 100%)",
         }}
@@ -522,7 +531,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
           >
             {bgmMuted ? "🔇" : "🔊"}
           </button>
-          <button
+          {/* <button
             onPointerDown={() => {
               setHistory(loadHistory());
               setBoardTab(selectedLevel ?? LEVELS[0].id);
@@ -542,7 +551,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
             }}
           >
             🏆 排行榜
-          </button>
+          </button> */}
         </div>
       </div>
 
@@ -550,6 +559,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
           row. Anchored to the real viewport's own bottom edge, same reasoning
           as the top bar above. */}
       <div
+        onPointerDown={(e) => e.stopPropagation()}
         style={{
           position: "absolute",
           bottom: 0,
@@ -560,7 +570,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
           alignItems: "center",
           justifyContent: "space-between",
           gap: Math.round(10 * scale),
-          padding: `${Math.round(10 * scale)}px ${Math.round(14 * scale)}px`,
+          padding: `${Math.round(30 * scale)}px ${Math.round(30 * scale)}px`,
           background:
             "linear-gradient(0deg,rgba(0,0,0,0.8) 0%,rgba(0,0,0,0) 100%)",
         }}
@@ -624,9 +634,13 @@ export default function Lobby({ onPlay }: LobbyProps) {
           </div>
         </div>
 
-        {/* Start button — mascot portrait sits inside, left of the label */}
+        {/* Start button — mascot portrait sits inside, left of the label. Pulses
+            a glowing halo once a level is selected so it's impossible to miss,
+            and gives a quick press-down squash via the .start-btn:active rule. */}
         <button
-          onPointerDown={() => {
+          className="start-btn"
+          onPointerDown={(e) => {
+            e.stopPropagation();
             if (canStart && selectedLevel != null) onPlay(selectedLevel);
           }}
           style={{
@@ -639,10 +653,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
               ? "linear-gradient(135deg,#f0a020,#e06010)"
               : "rgba(60,60,60,0.7)",
             color: canStart ? "#fff" : "#666",
-            // border: canStart ? "3px solid #000" : "2px solid #444",
-            // boxShadow: canStart
-            //   ? "0 0 0 2px #f0c040, 0 4px 20px rgba(240,160,32,0.5)"
-            //   : "none",
+            border: canStart ? "2px solid #ffd700" : "2px solid transparent",
             borderRadius: Math.round(12 * scale),
             fontWeight: 700,
             fontSize: Math.round(16 * scale),
@@ -651,6 +662,7 @@ export default function Lobby({ onPlay }: LobbyProps) {
             whiteSpace: "nowrap",
             touchAction: "manipulation",
             textShadow: canStart ? "0 1px 4px rgba(0,0,0,0.4)" : "none",
+            animation: canStart ? "startBtnPulse 1.6s ease-in-out infinite" : "none",
           }}
         >
           <div
@@ -675,7 +687,10 @@ export default function Lobby({ onPlay }: LobbyProps) {
           (see rankModalW above), so it can never exceed the screen. */}
       {showLeaderboard && (
         <div
-          onPointerDown={() => setShowLeaderboard(false)}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            setShowLeaderboard(false);
+          }}
           style={{
             position: "absolute",
             inset: 0,
