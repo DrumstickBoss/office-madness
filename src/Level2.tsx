@@ -1116,22 +1116,25 @@ function update(gs: GameState, now: number, dtMs: number) {
   // net catching them is a mistake, not a bonus (see the net-catching loop below).
   if (gs.phase === "bonus" && !gs.truckActive && now >= gs.bonusSpawnAt) {
     gs.bonusSpawnAt = now + rng(BONUS_SPAWN_MIN_MS, BONUS_SPAWN_MAX_MS);
-    const fromLeft = Math.random() < 0.5;
     const isDecoy = Math.random() < BONUS_DECOY_CHANCE;
     const def = isDecoy ? pick(DECOYS) : null;
     const t = isDecoy ? null : pick(TRASH_ITEMS);
+    // 噴射點分散在畫面下方一整排，不再只有左右兩個角落——每次噴出的位置都不一樣，
+    // 水平方向的初速也是獨立亂數（不是固定往對面飛），看起來更像噴泉多點噴發。
+    const spawnX = rng(LW * 0.08, LW * 0.92);
     gs.flying.push({
       id: gs.idCounter++,
       kind: isDecoy ? "decoy" : "trash",
       category: t?.category,
       icon: isDecoy ? def!.icon : t!.icon,
       label: isDecoy ? def!.label : t!.label,
-      x: fromLeft ? -20 : LW + 20,
+      x: spawnX,
       y: LH + 20,
-      vx: fromLeft ? rng(90, 170) : -rng(90, 170),
+      vx: rng(-140, 140),
       vy: -rng(480, 620),
       rot: 0,
-      vrot: rng(-6, 6),
+      // 老人／女友最多轉一圈就好，不要轉太多圈；一般垃圾維持原本轉速。
+      vrot: isDecoy ? rng(-2, 2) : rng(-6, 6),
       bonus: true,
     });
   }
@@ -1229,7 +1232,8 @@ function updateTutorial(gs: GameState, now: number, dtMs: number) {
         advanceTutorial(gs);
       } else {
         const emptySlot = gs.queueBatch.findIndex((s) => s === null);
-        if (emptySlot !== -1) gs.queueBatch[emptySlot] = spawnCategoryItem("recycle");
+        if (emptySlot !== -1)
+          gs.queueBatch[emptySlot] = spawnCategoryItem("recycle");
       }
     } else {
       if (it.kind !== "decoy") return;
@@ -1241,7 +1245,11 @@ function updateTutorial(gs: GameState, now: number, dtMs: number) {
         )!;
         const emptySlot = gs.queueBatch.findIndex((s) => s === null);
         if (emptySlot !== -1)
-          gs.queueBatch[emptySlot] = { kind: "decoy", icon: def.icon, label: def.label };
+          gs.queueBatch[emptySlot] = {
+            kind: "decoy",
+            icon: def.icon,
+            label: def.label,
+          };
       }
     }
   });
