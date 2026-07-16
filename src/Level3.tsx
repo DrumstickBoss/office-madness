@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState, useCallback } from "react";
 import { addRecord, getBestForLevel } from "./leaderboard";
+import { startLevel3Bgm, stopLevel3Bgm } from "./game3bgm";
 
 // ─── Canvas dimensions ────────────────────────────────────────────────────────
 const isPortraitViewport = () =>
@@ -191,67 +192,8 @@ const sfxSmash = () => {
   tone(110, 0.12, "sawtooth", 0.11, 0.04);
 };
 
-// ─── BGM ──────────────────────────────────────────────────────────────────────
-let bgmPlaying = false;
-let bgmTimer: ReturnType<typeof setTimeout> | null = null;
-
-const BGM_NOTES = [
-  440, 0, 523.25, 587.33, 659.25, 0, 783.99, 659.25, 523.25, 440, 0, 523.25,
-  587.33, 440, 659.25, 0,
-];
-
-function scheduleBgmCycle(bpm: number) {
-  const ctx = getSfxCtx();
-  if (!ctx || !bgmPlaying) return;
-  const e8 = 30 / bpm;
-  const t0 = ctx.currentTime + 0.04;
-  BGM_NOTES.forEach((freq, i) => {
-    if (freq <= 0) return;
-    const osc = ctx.createOscillator();
-    const g = ctx.createGain();
-    osc.type = "square";
-    osc.frequency.value = freq;
-    osc.connect(g);
-    g.connect(ctx.destination);
-    const t = t0 + i * e8;
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(0.05, t + 0.008);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + e8 * 0.7);
-    osc.start(t);
-    osc.stop(t + e8 * 0.8);
-  });
-  for (const beat of [0, 2]) {
-    const kick = ctx.createOscillator();
-    const kg = ctx.createGain();
-    kick.type = "sine";
-    kick.frequency.setValueAtTime(160, t0 + beat * e8 * 4);
-    kick.frequency.exponentialRampToValueAtTime(40, t0 + beat * e8 * 4 + 0.1);
-    kg.gain.setValueAtTime(0.22, t0 + beat * e8 * 4);
-    kg.gain.exponentialRampToValueAtTime(0.001, t0 + beat * e8 * 4 + 0.14);
-    kick.connect(kg);
-    kg.connect(ctx.destination);
-    kick.start(t0 + beat * e8 * 4);
-    kick.stop(t0 + beat * e8 * 4 + 0.16);
-  }
-  const loopMs = e8 * BGM_NOTES.length * 1000;
-  bgmTimer = setTimeout(() => {
-    if (bgmPlaying) scheduleBgmCycle(bpm);
-  }, loopMs - 60);
-}
-
-function startBgm(bpm: number) {
-  if (bgmPlaying) return;
-  bgmPlaying = true;
-  scheduleBgmCycle(bpm);
-}
-
-function stopBgm() {
-  bgmPlaying = false;
-  if (bgmTimer) {
-    clearTimeout(bgmTimer);
-    bgmTimer = null;
-  }
-}
+// ─── BGM — 運動會進行曲 (sports-day march), synthesized in game3bgm.ts ──────────
+// (See startLevel3Bgm / stopLevel3Bgm; styled after the Lobby's chiptune bgm.ts.)
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const rng3 = (min: number, max: number) =>
@@ -833,7 +775,7 @@ function spawnObstacle(gs: GameState) {
 
 function endGame(gs: GameState) {
   gs.status = "gameover";
-  stopBgm();
+  stopLevel3Bgm();
   if (!gs.scoreSaved) {
     gs.scoreSaved = true;
     const final = Math.round(gs.score);
@@ -932,8 +874,8 @@ export default function Level3({ onBack }: LevelProps) {
     gsRef.current.lastFrameTs = performance.now();
     gsRef.current.status = "playing";
     resizeCanvas();
-    stopBgm();
-    startBgm(148);
+    stopLevel3Bgm();
+    startLevel3Bgm();
     setUi({
       status: "playing",
       score: 0,
@@ -1129,7 +1071,7 @@ export default function Level3({ onBack }: LevelProps) {
     rafRef.current = requestAnimationFrame(loop);
     return () => {
       cancelAnimationFrame(rafRef.current);
-      stopBgm();
+      stopLevel3Bgm();
     };
   }, []);
 
