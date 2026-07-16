@@ -1702,67 +1702,43 @@ export default function Level3({ onBack }: LevelProps) {
         </div>
       )}
 
-      {/* Gameover screen */}
+      {/* Gameover screen — matches GameCanvas style (tap to restart) */}
       {isGameOver && (
         <div
+          onPointerDown={startGame}
           style={{
             position: "absolute",
             inset: 0,
-            background: "rgba(8,16,36,0.94)",
+            background: "rgba(0,0,0,0.75)",
             display: "flex",
             flexDirection: "column",
             alignItems: "center",
             justifyContent: "center",
-            gap: s(12),
+            gap: s(14),
             fontFamily: font,
             color: "#fff",
+            cursor: "pointer",
+            touchAction: "manipulation",
           }}
         >
-          <div style={{ fontSize: s(24), fontWeight: 800, color: "#f0c040" }}>
-            時間到！
+          <div style={{ fontSize: s(30), fontWeight: 800, color: "#f0c040" }}>
+            ⏰ 時間到！
           </div>
-          <div style={{ fontSize: s(34), fontWeight: 800 }}>{ui.score} 分</div>
-          <div style={{ fontSize: s(14), color: "#93c5fd" }}>
-            最高分：{Math.max(ui.score, ui.hiScore)}
+          <div style={{ fontSize: s(18), fontWeight: 800, color: "#fff" }}>
+            最終分數：{ui.score}
           </div>
-          <div style={{ display: "flex", gap: s(12), marginTop: s(8) }}>
-            <button
-              onPointerDown={startGame}
-              style={{
-                padding: `${s(10)}px ${s(22)}px`,
-                background: "linear-gradient(135deg,#7c3aed,#4f46e5)",
-                color: "#fff",
-                border: "2px solid #a78bfa",
-                borderRadius: s(10),
-                fontSize: s(15),
-                fontWeight: 700,
-                cursor: "pointer",
-                fontFamily: font,
-                touchAction: "manipulation",
-              }}
-            >
-              再玩一次
-            </button>
-            <button
-              onPointerDown={onBack}
-              style={{
-                background: "transparent",
-                border: "none",
-                padding: 0,
-                cursor: "pointer",
-                touchAction: "manipulation",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              <img
-                src={`${import.meta.env.BASE_URL}sprites/backto.png`}
-                alt="返回大廳"
-                draggable={false}
-                style={{ height: s(48), objectFit: "contain" }}
-              />
-            </button>
+          <div style={{ fontSize: s(15), fontWeight: 700, color: "#f0c040" }}>
+            最高分：{ui.hiScore}
+          </div>
+          <div
+            style={{
+              fontSize: s(16),
+              fontWeight: 800,
+              color: "#4ade80",
+              marginTop: s(8),
+            }}
+          >
+            點擊畫面重新開始
           </div>
         </div>
       )}
