@@ -2,7 +2,6 @@ import { useRef, useEffect, useState, useCallback } from "react";
 import { addRecord, getBestForLevel } from "./leaderboard";
 import { startGame2Bgm, stopGame2Bgm } from "./game2bgm";
 import game2BgSrc from "./assets/game2_bgm.mp4";
-import game2InfoSrc from "./assets/game2_info.png";
 
 // ─── Canvas dimensions ────────────────────────────────────────────────────
 // The canvas fills the real viewport pixel-for-pixel (same approach as
@@ -42,10 +41,16 @@ const SCORE_WRONG_BIN = -30;
 const SCORE_DECOY_PENALTY = -500;
 const SCORE_DECOY_CORRECT = 100; // correctly throwing a decoy into its correct side target
 const SCORE_CATCH = 50; // Bonus Time — catching a falling item in the net
+const SCORE_CATCH_DECOY_PENALTY = -100; // Bonus Time — catching 老人／女友 in the net instead of trash
 // Bonus Time's catching net — size of the sprite, and how close an item's
 // center has to get to the net's center to count as caught.
 const NET_SIZE = 96;
 const NET_CATCH_R = 42;
+// Bonus Time 掉落物有這個機率是老人／女友（而不是垃圾）混在裡面 — 接到會扣分。
+const BONUS_DECOY_CHANCE = 0.22;
+// 每次補貨（三個回收物全部丟完後重新補滿），混進一個老人／女友的固定機率 —
+// 老人／女友不再是額外跳出來的，而是直接混在手上的三個物品裡。
+const DECOY_BATCH_CHANCE = 0.3;
 // Player holds BATCH_SIZE items at once (free pick, any order); once every
 // slot has been thrown, a fresh batch refills all of them at once.
 const BATCH_SIZE = 3;
@@ -169,7 +174,8 @@ interface DecoyDef {
   side: "left" | "right"; // ambient cameo always enters/exits from this fixed edge
   correctTarget: "taxi" | "wheelchair"; // which side target is the *correct* throw for this decoy
   label: string;
-  penaltyMsg: string;
+  penaltyMsg: string; // shown when thrown straight into a bin (actually discarded)
+  wrongTargetMsg: string; // shown when thrown into the *other* side target (wrong vehicle, not discarded)
 }
 const DECOYS: DecoyDef[] = [
   {
@@ -183,6 +189,7 @@ const DECOYS: DecoyDef[] = [
     correctTarget: "wheelchair", // 老人要送輪椅才對，丟到計程車反而扣分
     label: "迷路的老人家",
     penaltyMsg: "老人家：我還沒問完路啊！！",
+    wrongTargetMsg: "老人家：叫計程車幹嘛？我要坐輪椅啦！！",
   },
   {
     icon: "gf",
@@ -195,6 +202,7 @@ const DECOYS: DecoyDef[] = [
     correctTarget: "taxi", // 女友要送計程車才對，丟到輪椅扣分
     label: "查勤的女友",
     penaltyMsg: "啪！！女友：你居然想丟掉我？！",
+    wrongTargetMsg: "啪！！女友：我腿好好的，坐什麼輪椅啦！！",
   },
 ];
 // Decoy sprites — preloaded up front, same pattern as TRASH_IMG_CACHE.
@@ -214,17 +222,16 @@ const POLICE_IMG = new Image();
 POLICE_IMG.src = `${import.meta.env.BASE_URL}sprites/stage2/police.png`;
 
 // ─── Ambient background cameo ───────────────────────────────────────────────
-// Purely decorative — grandpa always walks on from the left, gf always from the
-// right (def.side), during the throw phase. Not interactive, no score effect;
-// just atmosphere behind the actual gameplay. Three phases: slide in (idleImg)
-// → hold in place (idleImg) → slide back out the same edge (mirrorImg).
+// Purely decorative walking character — appears the instant the player picks
+// up (pointerDown) a decoy sitting in their held batch (see revealDecoy);
+// not on its own ambient timer any more, since 老人／女友 now live directly
+// in the 3-item batch instead of being swapped in temporarily. Three phases:
+// slide in (idleImg) → hold in place (idleImg) → slide back out (mirrorImg).
 const BG_DECOY_ENTER_MS = 1200; // 老人／女友走進畫面的時間 — 數字越大，進場走得越久
 // ▼▼▼ 老人／女友（連同計程車／輪椅，兩邊時機是綁在一起的）停留在畫面上的時間在這裡調整 ▼▼▼
 // 數字越大，停留越久、玩家有越多時間丟中計程車／輪椅。
 const BG_DECOY_HOLD_MS = 3200;
 const BG_DECOY_EXIT_MS = 650; // 沒被丟中、自然走掉時的退場時間 — 數字越大，退場走得越久
-const BG_DECOY_GAP_MIN_MS = 5000;
-const BG_DECOY_GAP_MAX_MS = 10000;
 // 背景客串圖片大小 — 比手上丟的誘餌圖更大一點，純裝飾用。
 const BG_DECOY_SIZE = 170;
 
@@ -484,7 +491,7 @@ interface QueueItem {
 }
 
 // The two new throw targets that replace the old "put down" button — appear
-// together whenever a held slot is currently a decoy (see GameState.decoySwap).
+// together once a decoy sitting in the batch is revealed (see GameState.activeDecoy).
 interface SideTargets {
   taxiSide: "left" | "right"; // which edge the taxi enters from this time (wheelchair takes the other)
   enterAt: number;
@@ -505,7 +512,7 @@ interface SideTargets {
 }
 
 interface GameState {
-  status: "idle" | "playing" | "gameover";
+  status: "idle" | "tutorial" | "playing" | "gameover";
   phase: "throw" | "bonus";
   score: number;
   best: number;
@@ -520,25 +527,20 @@ interface GameState {
   // Held items — BATCH_SIZE at a time, free pick; a slot goes null once thrown,
   // and the whole batch refills together once every slot is empty.
   queueBatch: (QueueItem | null)[];
-  // Purely decorative background cameo (see BG_DECOY_* consts / drawBgDecoy) —
-  // triggers decoySwap (below) when it appears, but otherwise unrelated to the
-  // throw batch — just a grandpa/gf silhouette peeking in from a screen edge.
+  // Purely decorative walking character (see BG_DECOY_* consts / drawBgDecoy)
+  // — revealed the instant the player picks up the decoy sitting in their
+  // held batch (see revealDecoy/activeDecoy below), not on its own timer.
   // Once the throw resolves (hit, whether correct or wrong — see
-  // resolveDecoySwap) it's dismissed instantly (gs.bgDecoy set straight to
-  // null); exitAt is only used for the timed-out-untouched case, where it
-  // still walks back out the side it entered from.
+  // resolveActiveDecoy) it's dismissed instantly (gs.bgDecoy set straight to
+  // null); exitAt is only used for the "revealed but never thrown" case,
+  // where it still walks back out the side it entered from.
   bgDecoy: { def: DecoyDef; startedAt: number; exitAt: number | null } | null;
-  bgDecoyNextAt: number;
-  // Set while the ambient cameo has swapped one held slot into a decoy —
-  // remembers the original item so it can be restored if never thrown.
-  // Auto-reverts in lockstep with the ambient cameo's own exit (see update()),
-  // so the taxi/wheelchair always retract at the same time it walks off.
-  decoySwap: {
-    slot: number;
-    def: DecoyDef;
-    originalItem: QueueItem;
-    startedAt: number;
-  } | null;
+  // Set while a decoy sitting in the batch has been "revealed" (player
+  // pressed/held it — see revealDecoy) — the taxi/wheelchair and the walking
+  // character are visible until this resolves. Unlike the old swap-in system,
+  // the decoy isn't temporarily replacing anything — it's a permanent member
+  // of the batch (see spawnBatch/DECOY_BATCH_CHANCE) until it's thrown.
+  activeDecoy: { slot: number; def: DecoyDef; startedAt: number } | null;
   sideTargets: SideTargets | null;
   aimSlot: number | null; // index into queueBatch currently being aimed, or null
   aimStart: { x: number; y: number } | null;
@@ -568,6 +570,13 @@ interface GameState {
   warningBeepSecond: number;
   binReorderBeepSecond: number; // countdown beep tracker for the "bins about to reorder" warning
   hasCaughtOnce: boolean; // Bonus Time — whether the player has used the net yet
+  // Hands-on onboarding tutorial (see setupTutorialStep/updateTutorial) — only
+  // set while gs.status === "tutorial". null once the whole game is running
+  // for real (status "playing") or before the tutorial has been started.
+  tutorial: { step: 1 | 2 | 3 } | null;
+  // Set once step 3 succeeds — shows the "開始遊戲" button that hands off to
+  // the real timed game (see startGame in the component).
+  tutorialAllDone: boolean;
 }
 
 function spawnTrashItem(): QueueItem {
@@ -575,32 +584,46 @@ function spawnTrashItem(): QueueItem {
   return { kind: "trash", category: t.category, icon: t.icon, label: t.label };
 }
 
+function spawnCategoryItem(category: BinType): QueueItem {
+  const t = pick(TRASH_ITEMS.filter((x) => x.category === category));
+  return { kind: "trash", category: t.category, icon: t.icon, label: t.label };
+}
+
+// 老人／女友不再是額外跳出來暫時交換的，而是直接混在補貨的三個物品裡（固定機率
+// 見 DECOY_BATCH_CHANCE）——最多同時混一個，跟畫面上一次只會有一組計程車／輪椅
+// 的設計搭配。
 function spawnBatch(): QueueItem[] {
-  return Array.from({ length: BATCH_SIZE }, () => spawnTrashItem());
+  const items = Array.from({ length: BATCH_SIZE }, () => spawnTrashItem());
+  if (Math.random() < DECOY_BATCH_CHANCE) {
+    const def = pick(DECOYS);
+    const slot = Math.floor(Math.random() * BATCH_SIZE);
+    items[slot] = { kind: "decoy", icon: def.icon, label: def.label };
+  }
+  return items;
 }
 
 // If every slot in the current batch has been thrown, refill all of them at
-// once with a fresh batch of plain trash (decoys only ever appear via the
-// ambient-cameo swap-in — see triggerDecoySwap — never from a normal refill).
+// once with a fresh batch (spawnBatch has its own chance of mixing in a
+// decoy). Tutorial mode manages its own queueBatch entirely (see
+// setupTutorialStep) and never auto-refills like this.
 function refillBatchIfEmpty(gs: GameState) {
+  if (gs.status === "tutorial") return;
   if (gs.queueBatch.every((slot) => slot === null)) {
     gs.queueBatch = spawnBatch();
   }
 }
 
-// Called the moment the ambient cameo (bgDecoy) appears — picks a random
-// currently-held slot and temporarily turns it into that decoy, and slides in
-// the taxi/wheelchair throw targets. If every slot is currently empty (rare —
-// only right after the last item of a batch was just thrown) there's nothing
-// to swap, so the cameo just walks past as pure decoration this time.
-function triggerDecoySwap(gs: GameState, def: DecoyDef, now: number) {
-  const eligible = gs.queueBatch
-    .map((item, i) => ({ item, i }))
-    .filter((s): s is { item: QueueItem; i: number } => s.item !== null);
-  if (eligible.length === 0) return;
-  const { item: originalItem, i: slot } = pick(eligible);
-  gs.decoySwap = { slot, def, originalItem, startedAt: now };
-  gs.queueBatch[slot] = { kind: "decoy", icon: def.icon, label: def.label };
+// Called when the player picks up (pointerDown) a batch slot that's already
+// a decoy — reveals the taxi/wheelchair throw targets and the walking
+// character, both of which stay hidden while the decoy just sits in hand
+// (see GameState.activeDecoy).
+function revealDecoy(gs: GameState, slot: number, now: number) {
+  const item = gs.queueBatch[slot];
+  if (!item || item.kind !== "decoy") return;
+  const def = DECOYS.find((d) => d.icon === item.icon);
+  if (!def) return;
+  gs.activeDecoy = { slot, def, startedAt: now };
+  gs.bgDecoy = { def, startedAt: now, exitAt: null };
   gs.sideTargets = {
     taxiSide: Math.random() < 0.5 ? "left" : "right",
     enterAt: now,
@@ -619,41 +642,35 @@ function triggerDecoySwap(gs: GameState, def: DecoyDef, now: number) {
   }
 }
 
-// Immediately dismisses the ambient cameo (no exit animation) and arms the
-// gap timer for the next one — used whenever the throw actually resolves
-// (correct or wrong); only a timeout gets the gradual walk-out instead.
-function dismissBgDecoyNow(gs: GameState, now: number) {
+// Immediately dismisses the walking character (no exit animation) — used
+// whenever the throw actually resolves (correct or wrong); only "hide" (the
+// player let go without throwing it) gets the gradual walk-out instead.
+function dismissBgDecoyNow(gs: GameState) {
   gs.bgDecoy = null;
-  gs.bgDecoyNextAt = now + rng(BG_DECOY_GAP_MIN_MS, BG_DECOY_GAP_MAX_MS);
 }
 
-type DecoyResolution = "correct" | "wrong" | "timeout";
+type DecoyResolution = "correct" | "wrong" | "hide";
 
-// Resolves the current decoy swap — restores the slot's original item if it
-// was never thrown (timeout only), and starts the side targets' retract
-// (which target flees chased by police, if any, is set separately by the
-// caller — see SideTargets.chasedTarget). The ambient cameo (grandpa/gf)
+// Resolves the currently-revealed decoy and starts the side targets'
+// retract (which target flees chased by police, if any, is set separately
+// by the caller — see SideTargets.chasedTarget). The walking character
 // itself just vanishes instantly on any resolved throw, correct or wrong;
-// only a timeout (never thrown) gets its normal walk-out-the-way-it-came.
-function resolveDecoySwap(
+// only "hide" (revealed but never thrown) gets its normal walk-out. The
+// decoy item itself is untouched here either way — it's a permanent batch
+// member (see spawnBatch) that only leaves the batch by actually being
+// thrown, same as any other item.
+function resolveActiveDecoy(
   gs: GameState,
   now: number,
   outcome: DecoyResolution,
 ) {
-  if (
-    outcome === "timeout" &&
-    gs.decoySwap &&
-    gs.queueBatch[gs.decoySwap.slot]?.kind === "decoy"
-  ) {
-    gs.queueBatch[gs.decoySwap.slot] = gs.decoySwap.originalItem;
-  }
-  gs.decoySwap = null;
+  gs.activeDecoy = null;
   gs.decoyHintActive = false;
   if (gs.sideTargets) gs.sideTargets.exitAt = now;
 
   if (gs.bgDecoy && gs.bgDecoy.exitAt === null) {
-    if (outcome === "timeout") gs.bgDecoy.exitAt = now;
-    else dismissBgDecoyNow(gs, now);
+    if (outcome === "hide") gs.bgDecoy.exitAt = now;
+    else dismissBgDecoyNow(gs);
   }
 }
 
@@ -689,13 +706,9 @@ function initState(best: number): GameState {
     binReorderTriggered: false,
     flying: [],
     popups: [],
-    // First batch is always plain trash — decoys only ever appear via the
-    // ambient cameo swap-in, never at game start.
     queueBatch: spawnBatch(),
     bgDecoy: null,
-    // First cameo appears a few seconds in rather than instantly on game start.
-    bgDecoyNextAt: performance.now() + rng(2000, 5000),
-    decoySwap: null,
+    activeDecoy: null,
     sideTargets: null,
     aimSlot: null,
     aimStart: null,
@@ -723,6 +736,8 @@ function initState(best: number): GameState {
     warningPlayed: false,
     warningBeepSecond: 0,
     binReorderBeepSecond: 0,
+    tutorial: null,
+    tutorialAllDone: false,
   };
 }
 
@@ -789,6 +804,13 @@ function addPopup(
   });
 }
 
+// Result of a landing check — correct is only meaningful when hit is true;
+// tutorial mode (see updateTutorial) uses it to decide whether a step passed.
+interface ThrowLandingResult {
+  hit: boolean;
+  correct?: boolean;
+}
+
 // Checks whether a non-bonus flying item is currently overlapping a side
 // target (taxi/wheelchair) or a bin, and resolves the hit (score, sound,
 // popup, bin/side-target flash) if so. Doesn't remove `it` from gs.flying —
@@ -798,9 +820,9 @@ function checkThrowLanding(
   gs: GameState,
   it: FlyingItem,
   now: number,
-): boolean {
+): ThrowLandingResult {
   // Side targets (計程車／輪椅) — only relevant to a decoy while it's live
-  // (see triggerDecoySwap / SideTargets). Uses its own Y position (sideTargetY)
+  // (see revealDecoy / SideTargets). Uses its own Y position (sideTargetY)
   // and a circular hit radius, independent of the bins' Y band below — their
   // vertical position can be tuned separately (see SIDE_TARGET_Y_OFFSET).
   // Which one is *correct* depends on the specific decoy (DecoyDef.correctTarget)
@@ -836,15 +858,15 @@ function checkThrowLanding(
         gs.shakeUntil = now + 320;
         gs.flashUntil = now + 220;
         gs.flashColor = "#ff2020";
-        gs.lastPenaltyMsg = def?.penaltyMsg ?? "慘叫！！";
+        gs.lastPenaltyMsg = def?.wrongTargetMsg ?? "慘叫！！";
         addPopup(gs, it.x, it.y, `${SCORE_DECOY_PENALTY}`, "#ff4040");
         playPenalty();
         // Wrong target — that one flees chased by police.png instead of
         // retracting normally (see the chase branch in drawSideTargets).
         gs.sideTargets.chasedTarget = hitTarget;
       }
-      resolveDecoySwap(gs, now, isCorrect ? "correct" : "wrong");
-      return true;
+      resolveActiveDecoy(gs, now, isCorrect ? "correct" : "wrong");
+      return { hit: true, correct: isCorrect };
     }
   }
 
@@ -853,7 +875,7 @@ function checkThrowLanding(
   // binDrawH/drawBins) instead of the much-shorter BIN_H, so throws landing
   // near the bottom of the bin register too.
   const binTop = BIN_OPEN_Y() - 6;
-  if (it.y < binTop || it.y > binTop + binDrawH()) return false;
+  if (it.y < binTop || it.y > binTop + binDrawH()) return { hit: false };
   const hitBin = gs.bins.find((b) => Math.abs(b.x - it.x) <= BIN_W / 2);
   if (hitBin) {
     hitBin.flashUntil = now + 260;
@@ -868,24 +890,117 @@ function checkThrowLanding(
       gs.lastPenaltyMsg = decoy?.penaltyMsg ?? "慘叫！！";
       addPopup(gs, it.x, it.y, `${SCORE_DECOY_PENALTY}`, "#ff4040");
       playPenalty();
-      resolveDecoySwap(gs, now, "wrong");
+      resolveActiveDecoy(gs, now, "wrong");
+      return { hit: true, correct: false };
     } else if (it.category === hitBin.type) {
       gs.score += SCORE_CORRECT;
       hitBin.flashGood = true;
       addPopup(gs, it.x, it.y, `+${SCORE_CORRECT}`, "#4ade80");
       playCorrect();
+      return { hit: true, correct: true };
     } else {
       gs.score += SCORE_WRONG_BIN;
       hitBin.flashGood = false;
       addPopup(gs, it.x, it.y, `${SCORE_WRONG_BIN}`, "#f0a020");
       playWrong();
+      return { hit: true, correct: false };
     }
-    return true;
   }
-  return false;
+  return { hit: false };
 }
 
 // ─── Update ───────────────────────────────────────────────────────────────
+// Advances every flying item's physics one frame and resolves landings (bins/
+// side targets for straight-line throws, off-screen cleanup for both kinds).
+// Shared by the real game (update) and the tutorial (updateTutorial) so both
+// get identical collision behavior — onResolved lets the tutorial hook into
+// "was the thing that just landed correct?" without checkThrowLanding itself
+// needing to know anything about tutorial mode.
+function stepFlyingItems(
+  gs: GameState,
+  now: number,
+  dt: number,
+  onResolved?: (it: FlyingItem, correct: boolean) => void,
+) {
+  for (let i = gs.flying.length - 1; i >= 0; i--) {
+    const it = gs.flying[i];
+    if (it.bonus) {
+      it.x += it.vx * dt;
+      it.y += it.vy * dt;
+      it.vy += GRAVITY * dt; // straight-line throws ignore gravity; only Bonus Time arcs
+      it.rot += it.vrot * dt;
+    } else {
+      // Straight-line throws move in BIN_COLLISION_SUBSTEPS small hops instead
+      // of one big jump — a fast throw can easily cover more than a bin's
+      // width in a single frame, which let it fly straight through without
+      // ever landing exactly on a bin/side-target during the one frame checked.
+      const subDt = dt / BIN_COLLISION_SUBSTEPS;
+      let result: ThrowLandingResult = { hit: false };
+      for (let s = 0; s < BIN_COLLISION_SUBSTEPS; s++) {
+        it.x += it.vx * subDt;
+        it.y += it.vy * subDt;
+        result = checkThrowLanding(gs, it, now);
+        if (result.hit) break;
+      }
+      it.rot += it.vrot * dt;
+      if (result.hit) {
+        onResolved?.(it, !!result.correct);
+        gs.flying.splice(i, 1);
+        continue;
+      }
+    }
+
+    // Off-screen cleanup (straight-line misses fly off the top with no gravity to bring them back).
+    // A straight-line throw that never hit anything is still a resolution
+    // (an outright miss) — tutorial mode needs this too, so it can respawn a
+    // fresh target instead of getting stuck with nothing left to throw.
+    if (it.y > LH + 60 || it.y < -60 || it.x < -80 || it.x > LW + 80) {
+      if (!it.bonus) onResolved?.(it, false);
+      gs.flying.splice(i, 1);
+    }
+  }
+}
+
+// Advances the walking character / side-targets' enter-hold-exit lifecycle
+// and the one-time decoy tooltip's timeout — shared by update() and
+// updateTutorial() so the reveal/retract animations play out identically in
+// both modes.
+function stepDecoyLifecycle(gs: GameState, now: number) {
+  if (gs.decoyHintActive && now > gs.decoyHintUntil) gs.decoyHintActive = false;
+
+  if (gs.bgDecoy) {
+    const exitStart =
+      gs.bgDecoy.exitAt ??
+      gs.bgDecoy.startedAt + BG_DECOY_ENTER_MS + BG_DECOY_HOLD_MS;
+    if (now - exitStart > BG_DECOY_EXIT_MS) dismissBgDecoyNow(gs);
+  }
+
+  // Still holding a decoy once the walking character itself starts walking
+  // back out on its own natural schedule (revealed, but never thrown in
+  // time) — hide the targets right now, so everything exits together. Skips
+  // this while the player is actively dragging that exact slot, so the
+  // targets never get yanked away mid-aim.
+  if (
+    gs.activeDecoy &&
+    gs.bgDecoy &&
+    gs.bgDecoy.exitAt === null &&
+    gs.aimSlot !== gs.activeDecoy.slot &&
+    now - gs.bgDecoy.startedAt >= BG_DECOY_ENTER_MS + BG_DECOY_HOLD_MS
+  ) {
+    resolveActiveDecoy(gs, now, "hide");
+  }
+
+  // Side targets fully retract a moment after they start exiting, then are
+  // cleared — waits the longer chase duration if one of them is being
+  // chased off by police (see SideTargets.chasedTarget).
+  if (gs.sideTargets && gs.sideTargets.exitAt !== null) {
+    const exitDur = gs.sideTargets.chasedTarget
+      ? SIDE_TARGET_CHASE_EXIT_MS
+      : SIDE_TARGET_EXIT_MS;
+    if (now - gs.sideTargets.exitAt > exitDur) gs.sideTargets = null;
+  }
+}
+
 function update(gs: GameState, now: number, dtMs: number) {
   const dt = dtMs / 1000;
   gs.elapsed += dtMs;
@@ -996,124 +1111,150 @@ function update(gs: GameState, now: number, dtMs: number) {
     if (gs.truckX + truckDrawW() / 2 < -40) gs.truckActive = false;
   }
 
-  // Bonus spawns — wait for the truck to fully drive off-screen before anything appears
+  // Bonus spawns — wait for the truck to fully drive off-screen before anything appears.
+  // A fixed chance is 老人／女友 instead of trash (see BONUS_DECOY_CHANCE) — the
+  // net catching them is a mistake, not a bonus (see the net-catching loop below).
   if (gs.phase === "bonus" && !gs.truckActive && now >= gs.bonusSpawnAt) {
     gs.bonusSpawnAt = now + rng(BONUS_SPAWN_MIN_MS, BONUS_SPAWN_MAX_MS);
-    const t = pick(TRASH_ITEMS);
-    const fromLeft = Math.random() < 0.5;
+    const isDecoy = Math.random() < BONUS_DECOY_CHANCE;
+    const def = isDecoy ? pick(DECOYS) : null;
+    const t = isDecoy ? null : pick(TRASH_ITEMS);
+    // 噴射點分散在畫面下方一整排，不再只有左右兩個角落——每次噴出的位置都不一樣，
+    // 水平方向的初速也是獨立亂數（不是固定往對面飛），看起來更像噴泉多點噴發。
+    const spawnX = rng(LW * 0.08, LW * 0.92);
     gs.flying.push({
       id: gs.idCounter++,
-      kind: "trash",
-      category: t.category,
-      icon: t.icon,
-      label: t.label,
-      x: fromLeft ? -20 : LW + 20,
+      kind: isDecoy ? "decoy" : "trash",
+      category: t?.category,
+      icon: isDecoy ? def!.icon : t!.icon,
+      label: isDecoy ? def!.label : t!.label,
+      x: spawnX,
       y: LH + 20,
-      vx: fromLeft ? rng(90, 170) : -rng(90, 170),
+      vx: rng(-140, 140),
       vy: -rng(480, 620),
       rot: 0,
-      vrot: rng(-6, 6),
+      // 老人／女友最多轉一圈就好，不要轉太多圈；一般垃圾維持原本轉速。
+      vrot: isDecoy ? rng(-2, 2) : rng(-6, 6),
       bonus: true,
     });
   }
 
-  // Flying items physics
-  for (let i = gs.flying.length - 1; i >= 0; i--) {
-    const it = gs.flying[i];
-    if (it.bonus) {
-      it.x += it.vx * dt;
-      it.y += it.vy * dt;
-      it.vy += GRAVITY * dt; // straight-line throws ignore gravity; only Bonus Time arcs
-      it.rot += it.vrot * dt;
-    } else {
-      // Straight-line throws move in BIN_COLLISION_SUBSTEPS small hops instead
-      // of one big jump — a fast throw can easily cover more than a bin's
-      // width in a single frame, which let it fly straight through without
-      // ever landing exactly on a bin/side-target during the one frame checked.
-      const subDt = dt / BIN_COLLISION_SUBSTEPS;
-      let hit = false;
-      for (let s = 0; s < BIN_COLLISION_SUBSTEPS; s++) {
-        it.x += it.vx * subDt;
-        it.y += it.vy * subDt;
-        if (checkThrowLanding(gs, it, now)) {
-          hit = true;
-          break;
-        }
-      }
-      it.rot += it.vrot * dt;
-      if (hit) {
-        gs.flying.splice(i, 1);
-        continue;
-      }
-    }
-
-    // Off-screen cleanup (straight-line misses fly off the top with no gravity to bring them back)
-    if (it.y > LH + 60 || it.y < -60 || it.x < -80 || it.x > LW + 80) {
-      gs.flying.splice(i, 1);
-    }
-  }
-
-  // Decoy tooltip times out if the player just sits on it without acting
-  if (gs.decoyHintActive && now > gs.decoyHintUntil) gs.decoyHintActive = false;
-
-  // Ambient background cameo — also kicks off the decoy swap-in (see triggerDecoySwap).
-  // The taxi/wheelchair (and vice versa) retract in lockstep with it — see
-  // resolveDecoySwap, which sets bgDecoy.exitAt the instant either side
-  // resolves, instead of each running on its own independent timer.
-  if (gs.phase === "throw") {
-    if (gs.bgDecoy) {
-      const exitStart =
-        gs.bgDecoy.exitAt ??
-        gs.bgDecoy.startedAt + BG_DECOY_ENTER_MS + BG_DECOY_HOLD_MS;
-      if (now - exitStart > BG_DECOY_EXIT_MS) dismissBgDecoyNow(gs, now);
-    } else if (now >= gs.bgDecoyNextAt) {
-      const def = pick(DECOYS);
-      gs.bgDecoy = { def, startedAt: now, exitAt: null };
-      triggerDecoySwap(gs, def, now);
-    }
-  }
-
-  // Still holding a decoy once the ambient cameo itself starts walking back
-  // out on its own natural schedule (never got thrown in time) — restore the
-  // original item and start the side targets' retract right now, so
-  // everything exits together.
-  if (
-    gs.decoySwap &&
-    gs.bgDecoy &&
-    gs.bgDecoy.exitAt === null &&
-    now - gs.bgDecoy.startedAt >= BG_DECOY_ENTER_MS + BG_DECOY_HOLD_MS
-  ) {
-    resolveDecoySwap(gs, now, "timeout");
-  }
-
-  // Side targets fully retract a moment after they start exiting, then are
-  // cleared — waits the longer chase duration if one of them is being
-  // chased off by police (see SideTargets.chasedTarget).
-  if (gs.sideTargets && gs.sideTargets.exitAt !== null) {
-    const exitDur = gs.sideTargets.chasedTarget
-      ? SIDE_TARGET_CHASE_EXIT_MS
-      : SIDE_TARGET_EXIT_MS;
-    if (now - gs.sideTargets.exitAt > exitDur) gs.sideTargets = null;
-  }
+  stepFlyingItems(gs, now, dt);
+  stepDecoyLifecycle(gs, now);
 
   // Popups aging
   gs.popups = gs.popups.filter((p) => now - p.born < 900);
 
   // Net catching (Bonus Time) — runs every frame the net is held down, so an
   // item falling into a stationary net still gets caught even without the
-  // pointer itself moving.
+  // pointer itself moving. Catching 老人／女友 is a penalty, not a bonus.
   if (gs.phase === "bonus" && gs.netActive) {
     for (let i = gs.flying.length - 1; i >= 0; i--) {
       const it = gs.flying[i];
       if (!it.bonus) continue;
       if (Math.hypot(it.x - gs.netX, it.y - gs.netY) < NET_CATCH_R) {
-        gs.score += SCORE_CATCH;
-        addPopup(gs, it.x, it.y, `+${SCORE_CATCH}`, "#f0c040");
-        playCatch();
+        if (it.kind === "decoy") {
+          gs.score += SCORE_CATCH_DECOY_PENALTY;
+          gs.shakeUntil = now + 320;
+          gs.flashUntil = now + 220;
+          gs.flashColor = "#ff2020";
+          const def = DECOYS.find((d) => d.icon === it.icon);
+          gs.lastPenaltyMsg = def?.penaltyMsg ?? "慘叫！！";
+          addPopup(gs, it.x, it.y, `${SCORE_CATCH_DECOY_PENALTY}`, "#ff4040");
+          playPenalty();
+        } else {
+          gs.score += SCORE_CATCH;
+          addPopup(gs, it.x, it.y, `+${SCORE_CATCH}`, "#f0c040");
+          playCatch();
+        }
         gs.flying.splice(i, 1);
       }
     }
   }
+}
+
+// ─── Onboarding tutorial ────────────────────────────────────────────────────
+// Sets up the forced batch/hint state for one hands-on tutorial step. Step 1
+// teaches bin-sorting (a recyclable item mixed among a food/general item, has
+// to land in the recycle bin); steps 2/3 teach the decoy hold-to-reveal → throw
+// into the correct side target (girlfriend → taxi, then grandpa → wheelchair).
+function setupTutorialStep(gs: GameState, step: 1 | 2 | 3) {
+  gs.tutorial = { step };
+  gs.decoyHintShownEver = false; // let the one-time arrow-hint fire again for steps 2/3
+  gs.decoyHintActive = false;
+  gs.bgDecoy = null;
+  gs.sideTargets = null;
+  gs.activeDecoy = null;
+  gs.aimSlot = null;
+  gs.aimStart = null;
+  gs.aimCurrent = null;
+  gs.flying = [];
+  if (step === 1) {
+    gs.queueBatch = [
+      spawnCategoryItem("general"),
+      spawnCategoryItem("recycle"),
+      spawnCategoryItem("food"),
+    ];
+  } else {
+    const def = DECOYS.find((d) => d.icon === (step === 2 ? "gf" : "grandpa"))!;
+    gs.queueBatch = [
+      spawnTrashItem(),
+      { kind: "decoy", icon: def.icon, label: def.label },
+      spawnTrashItem(),
+    ];
+  }
+}
+
+// Step 1 → 2 → 3 → tutorialAllDone (shows the "開始遊戲" button in the component).
+function advanceTutorial(gs: GameState) {
+  if (!gs.tutorial) return;
+  if (gs.tutorial.step < 3) {
+    setupTutorialStep(gs, (gs.tutorial.step + 1) as 1 | 2 | 3);
+  } else {
+    gs.tutorial = null;
+    gs.tutorialAllDone = true;
+  }
+}
+
+// Tutorial's own update loop — reuses the same physics/collision and decoy
+// lifecycle stepping as the real game (see stepFlyingItems/stepDecoyLifecycle),
+// but skips every timer-driven system (throw-phase countdown, bin reorder,
+// Bonus Time) so the scripted scenario stays put until the player actually
+// clears it. A wrong throw of the step's target respawns a fresh one into
+// whichever slot just opened up, so the player can keep retrying.
+function updateTutorial(gs: GameState, now: number, dtMs: number) {
+  const dt = dtMs / 1000;
+  stepFlyingItems(gs, now, dt, (it, correct) => {
+    if (!gs.tutorial) return;
+    if (gs.tutorial.step === 1) {
+      if (it.kind !== "trash" || it.category !== "recycle") return;
+      if (correct) {
+        advanceTutorial(gs);
+      } else {
+        const emptySlot = gs.queueBatch.findIndex((s) => s === null);
+        if (emptySlot !== -1)
+          gs.queueBatch[emptySlot] = spawnCategoryItem("recycle");
+      }
+    } else {
+      if (it.kind !== "decoy") return;
+      if (correct) {
+        advanceTutorial(gs);
+      } else {
+        const def = DECOYS.find(
+          (d) => d.icon === (gs.tutorial!.step === 2 ? "gf" : "grandpa"),
+        )!;
+        const emptySlot = gs.queueBatch.findIndex((s) => s === null);
+        if (emptySlot !== -1)
+          gs.queueBatch[emptySlot] = {
+            kind: "decoy",
+            icon: def.icon,
+            label: def.label,
+          };
+      }
+    }
+  });
+  stepDecoyLifecycle(gs, now);
+  gs.popups = gs.popups.filter((p) => now - p.born < 900);
 }
 
 // ─── Drawing ────────────────────────────────────────────────────────────────
@@ -1539,11 +1680,11 @@ function drawDecoyHint(
   gs: GameState,
   now: number,
 ) {
-  if (!gs.decoyHintActive || !gs.decoySwap || !gs.sideTargets) return;
+  if (!gs.decoyHintActive || !gs.activeDecoy || !gs.sideTargets) return;
   const pulse = 1 + Math.sin(now / 160) * 0.05;
-  const tipX = batchSlotX(gs.decoySwap.slot),
+  const tipX = batchSlotX(gs.activeDecoy.slot),
     tipY = THROWER_ITEM_Y() - 60;
-  const correctTarget = gs.decoySwap.def.correctTarget;
+  const correctTarget = gs.activeDecoy.def.correctTarget;
   const correctSide =
     correctTarget === "taxi"
       ? gs.sideTargets.taxiSide
@@ -1581,6 +1722,66 @@ function drawDecoyHint(
   ctx.stroke();
   ctx.setLineDash([]);
   ctx.restore();
+}
+
+// Hands-on tutorial overlay — a step indicator plus a live hint pointing at
+// whatever the player needs to do right now. Step 1 points from the held
+// recyclable item to the recycle bin; steps 2/3, before the decoy has been
+// revealed, tell the player to press and hold it (once revealed, the existing
+// drawDecoyHint tooltip above takes over automatically).
+function drawTutorialHint(
+  ctx: CanvasRenderingContext2D,
+  gs: GameState,
+  now: number,
+) {
+  if (!gs.tutorial) return;
+  const pulse = 1 + Math.sin(now / 160) * 0.05;
+
+  ctx.save();
+  ctx.translate(LW / 2, 30);
+  drawFramedLines(ctx, 0, 0, [`教學 ${gs.tutorial.step} ／ 3`], 13);
+  ctx.restore();
+
+  if (gs.tutorial.step === 1) {
+    const slot = gs.queueBatch.findIndex(
+      (it) => it?.kind === "trash" && it.category === "recycle",
+    );
+    const bin = gs.bins.find((b) => b.type === "recycle");
+    if (slot === -1 || !bin) return;
+    const tipX = batchSlotX(slot),
+      tipY = THROWER_ITEM_Y() - 60;
+
+    ctx.save();
+    ctx.translate(tipX, tipY);
+    ctx.scale(pulse, pulse);
+    drawFramedLines(ctx, 0, 0, ["👉 丟進可回收垃圾桶！"], 13);
+    ctx.restore();
+
+    ctx.save();
+    ctx.strokeStyle = "#ffe08a";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(tipX, tipY + 24);
+    ctx.lineTo(bin.x, BIN_OPEN_Y());
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  } else if (!gs.activeDecoy) {
+    const def = DECOYS.find(
+      (d) => d.icon === (gs.tutorial!.step === 2 ? "gf" : "grandpa"),
+    )!;
+    const slot = gs.queueBatch.findIndex((it) => it?.kind === "decoy");
+    if (slot === -1) return;
+    const tipX = batchSlotX(slot),
+      tipY = THROWER_ITEM_Y() - 60;
+
+    ctx.save();
+    ctx.translate(tipX, tipY);
+    ctx.scale(pulse, pulse);
+    drawFramedLines(ctx, 0, 0, [`👉 按住${def.label}！`], 13);
+    ctx.restore();
+  }
 }
 
 // The two new throw targets that replace the old "put down" button — slide in
@@ -1939,6 +2140,15 @@ function render(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
   // wider than the fixed-design LW on wide/landscape screens).
   drawBackground(ctx, gs.phase);
 
+  // Tutorial mode dims the busy background scene so the framed hint text
+  // (drawTutorialHint/drawDecoyHint) reads clearly against it — only the
+  // background gets dimmed, since this is drawn before the bins/thrower/hints
+  // below.
+  if (gs.status === "tutorial") {
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(0, 0, fullLW(), LH);
+  }
+
   // The fixed-design content (LW × LH) is centered within that full width
   // instead of pinned to the left edge — this is what keeps everything
   // looking centered rather than skewed on wide viewports.
@@ -1949,17 +2159,23 @@ function render(ctx: CanvasRenderingContext2D, gs: GameState, now: number) {
     ctx.translate(rng(-6, 6), rng(-6, 6));
   }
 
+  // Once the tutorial is fully cleared, hide the bins/held items/thrower —
+  // the "開始遊戲" prompt takes over the whole screen (see the component's
+  // tutorialAllDone overlay) instead of sitting on top of a busy scene.
+  const showGameplay = !(gs.status === "tutorial" && gs.tutorialAllDone);
+
   // Ambient background cameo drawn first so it sits behind the bins/thrower/items.
-  if (gs.phase === "throw") drawBgDecoy(ctx, gs, now);
-  if (gs.phase === "throw") drawBins(ctx, gs, now);
-  if (gs.phase === "throw") drawSideTargets(ctx, gs, now);
+  if (gs.phase === "throw" && showGameplay) drawBgDecoy(ctx, gs, now);
+  if (gs.phase === "throw" && showGameplay) drawBins(ctx, gs, now);
+  if (gs.phase === "throw" && showGameplay) drawSideTargets(ctx, gs, now);
   drawTruck(ctx, gs);
   for (const it of gs.flying) drawFlyingItem(ctx, it);
-  if (gs.phase === "throw") {
+  if (gs.phase === "throw" && showGameplay) {
     drawPowerBar(ctx, gs);
     drawThrower(ctx, gs, now);
     drawSwipeHint(ctx, gs, now);
     drawDecoyHint(ctx, gs, now);
+    drawTutorialHint(ctx, gs, now);
   }
   if (gs.phase === "bonus") {
     drawNetHint(ctx, gs, now);
@@ -1995,7 +2211,10 @@ export default function Level2({ onBack }: Level2Props) {
   const rafRef = useRef(0);
   const exitConfirmRef = useRef(false);
 
-  const [status, setStatus] = useState<"idle" | "playing" | "gameover">("idle");
+  const [status, setStatus] = useState<
+    "idle" | "tutorial" | "playing" | "gameover"
+  >("idle");
+  const [tutorialAllDone, setTutorialAllDone] = useState(false);
   const [scoreDisplay, setScoreDisplay] = useState(0);
   const [timeLeftDisplay, setTimeLeftDisplay] = useState(TOTAL_MS);
   const [showExitConfirm, setShowExitConfirm] = useState(false);
@@ -2015,6 +2234,20 @@ export default function Level2({ onBack }: Level2Props) {
     startGame2Bgm();
   }, []);
 
+  // Hands-on 3-step tutorial — reuses the exact same GameState/update/render
+  // pipeline as the real game (see updateTutorial/setupTutorialStep) so bins,
+  // throwing, and the decoy hold-to-reveal mechanic all work identically;
+  // only the timers (throw-phase countdown, bin reorder, Bonus Time) are off.
+  const startTutorial = useCallback(() => {
+    const best = gsRef.current.best;
+    gsRef.current = initState(best);
+    gsRef.current.status = "tutorial";
+    gsRef.current.lastFrameTs = performance.now();
+    setupTutorialStep(gsRef.current, 1);
+    setTutorialAllDone(false);
+    setStatus("tutorial");
+  }, []);
+
   // Background audio is now the synthesized chiptune BGM (startGame2Bgm / Für
   // Elise) rather than a video's own soundtrack. This still calls play() in
   // case the background <video> is swapped back in later — a harmless no-op
@@ -2028,18 +2261,26 @@ export default function Level2({ onBack }: Level2Props) {
     const canvas = canvasRef.current!;
     const ctx = canvas.getContext("2d")!;
     let statusSent = gsRef.current.status;
+    let tutorialAllDoneSent = gsRef.current.tutorialAllDone;
     let lastHudSync = 0;
 
     const loop = (now: number) => {
       const gs = gsRef.current;
       const dt = Math.min(now - gs.lastFrameTs, 50);
       gs.lastFrameTs = now;
-      if (gs.status === "playing" && !exitConfirmRef.current)
+      if (gs.status === "playing" && !exitConfirmRef.current) {
         update(gs, now, dt);
+      } else if (gs.status === "tutorial") {
+        updateTutorial(gs, now, dt);
+      }
       render(ctx, gs, now);
       if (gs.status !== statusSent) {
         statusSent = gs.status;
         setStatus(gs.status);
+      }
+      if (gs.tutorialAllDone !== tutorialAllDoneSent) {
+        tutorialAllDoneSent = gs.tutorialAllDone;
+        setTutorialAllDone(gs.tutorialAllDone);
       }
       // Sync SCORE/TIME to the DOM HUD only every ~100ms to avoid excessive re-renders
       if (now - lastHudSync > 100) {
@@ -2120,11 +2361,18 @@ export default function Level2({ onBack }: Level2Props) {
         startGame();
         return;
       }
-      if (gs.status !== "playing") return;
+      if (gs.status !== "playing" && gs.status !== "tutorial") return;
       const p = toLocal(e);
       if (gs.phase === "throw") {
         const slot = hitTestBatchSlot(gs, p);
         if (slot === null) return;
+        // Picking up a decoy sitting in the batch is what reveals the
+        // taxi/wheelchair and the walking character — they stay hidden
+        // until the player actually presses/holds it (see revealDecoy).
+        const item = gs.queueBatch[slot];
+        if (item?.kind === "decoy" && gs.activeDecoy?.slot !== slot) {
+          revealDecoy(gs, slot, performance.now());
+        }
         gs.aimSlot = slot;
         gs.aimStart = p;
         gs.aimCurrent = p;
@@ -2141,7 +2389,7 @@ export default function Level2({ onBack }: Level2Props) {
   const onPointerMove = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       const gs = gsRef.current;
-      if (gs.status !== "playing") return;
+      if (gs.status !== "playing" && gs.status !== "tutorial") return;
       const p = toLocal(e);
       if (gs.phase === "throw" && gs.aimSlot !== null) {
         gs.aimCurrent = p;
@@ -2207,7 +2455,7 @@ export default function Level2({ onBack }: Level2Props) {
 
   const onPointerUp = useCallback(() => {
     const gs = gsRef.current;
-    if (gs.status !== "playing") return;
+    if (gs.status !== "playing" && gs.status !== "tutorial") return;
     // Bonus Time's net stays put at its last held position after release
     // instead of vanishing — it only ever appears/moves again on the next
     // pointerDown/Move, and stops being drawn once Bonus Time itself ends
@@ -2565,9 +2813,11 @@ export default function Level2({ onBack }: Level2Props) {
         </button>
       )}
 
-      {/* Idle screen */}
+      {/* Idle screen — same interaction as GameCanvas (Level 1)'s drawIdleScreen:
+          tap anywhere on the screen to start (no separate button). */}
       {status === "idle" && (
         <div
+          onPointerDown={startTutorial}
           style={{
             position: "absolute",
             inset: 0,
@@ -2577,56 +2827,93 @@ export default function Level2({ onBack }: Level2Props) {
             alignItems: "center",
             justifyContent: "center",
             padding: 20,
-            gap: 10,
+            gap: 16,
             textAlign: "center",
             fontFamily: "'Cubic11', sans-serif",
             color: "#fff",
+            cursor: "pointer",
+            touchAction: "manipulation",
           }}
         >
-          {/* <div style={{ fontSize: 46 }}>♻️</div>
-          <div style={{ fontSize: 26, fontWeight: 800, color: "#60a5fa" }}>
-            垃圾分類王
-          </div> */}
-          {/* 開頭規則說明圖 — 撐滿可用高度，寬度依圖片比例縮放，
-              左右多出的空間就露出外層的半透明黑底（不額外貼色底）。 */}
-          <button
-            onPointerDown={startGame}
+          {/* 文字大小比照遊戲一（GameCanvas drawIdleScreen）的標題／副標／提示比例。 */}
+          <div style={{ fontSize: s(30), fontWeight: 800, color: "#60a5fa" }}>
+            垃圾分類大作戰
+          </div>
+          <div
             style={{
-              height: "100vh",
-              // maxHeight: 420,
-              width: "auto",
-              // maxWidth: "94vw",
-              objectFit: "contain",
+              display: "flex",
+              flexDirection: "column",
+              gap: s(6),
+              marginTop: s(4),
             }}
           >
-            <img
-              src={game2InfoSrc}
-              alt="遊戲說明"
-              draggable={false}
-              style={{
-                width: "100%",
-                height: "100%",
-              }}
-            />
-          </button>
-          {/* <button
-            onPointerDown={startGame}
+            {[
+              { text: "丟對垃圾桶　+100 分", color: "#4ade80" },
+              { text: "丟錯垃圾桶　-30 分", color: "#f87171" },
+              {
+                text: "老人／女友會混在手上的物品裡，按住他們計程車／輪椅才會出現",
+                color: "#e2e8f0",
+              },
+              {
+                text: "送對車　+100 分／送錯車或丟進垃圾桶　-500 分",
+                color: "#e2e8f0",
+              },
+              {
+                text: "最後垃圾車來襲！接住掉落垃圾 +50 分，接到老人／女友 -100 分",
+                color: "#e2e8f0",
+              },
+            ].map((r, i) => (
+              <div key={i} style={{ fontSize: s(14), color: r.color }}>
+                {r.text}
+              </div>
+            ))}
+          </div>
+          <div
             style={{
-              marginTop: 10,
-              padding: "12px 32px",
-              background: "linear-gradient(135deg,#2f6fd6,#1c4fa8)",
-              color: "#fff",
-              border: "2px solid #60a5fa",
-              borderRadius: 12,
-              fontSize: 17,
+              marginTop: s(14),
+              fontSize: s(19),
               fontWeight: 700,
-              cursor: "pointer",
-              fontFamily: "'Cubic11', sans-serif",
-              touchAction: "manipulation",
+              color: "#4ade80",
             }}
           >
-            開始遊戲 →
-          </button> */}
+            點擊畫面開始教學
+          </div>
+        </div>
+      )}
+
+      {/* Tutorial-complete prompt — appears once all 3 steps are cleared
+          (gs.tutorialAllDone), handing off to the real timed game via the
+          same startGame() the old idle screen used. No button chrome — just
+          plain white text, tap anywhere. The bins/held items/thrower are
+          hidden behind this too (see render()'s tutorialAllDone gate). */}
+      {status === "tutorial" && tutorialAllDone && (
+        <div
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            startGame();
+          }}
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 50,
+            cursor: "pointer",
+            touchAction: "manipulation",
+          }}
+        >
+          <div
+            style={{
+              color: "#fff",
+              fontSize: s(24),
+              fontWeight: 800,
+              fontFamily: "'Cubic11', sans-serif",
+              textShadow: "0 2px 8px rgba(0,0,0,0.8)",
+            }}
+          >
+            🎉 學會了！點擊畫面開始遊戲 →
+          </div>
         </div>
       )}
 
