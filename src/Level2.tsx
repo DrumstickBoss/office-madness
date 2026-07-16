@@ -2769,7 +2769,7 @@ export default function Level2({ onBack }: Level2Props) {
       )}
 
       {/* Back button — hidden mid-play so it doesn't overlap the HUD.
-          Same scaled gradient button as GameCanvas (Level 1) for a consistent look. */}
+          Sprite image, matching the other levels' 返回大廳 button. */}
       {status !== "playing" && (
         <button
           onPointerDown={(e) => {
@@ -2781,35 +2781,23 @@ export default function Level2({ onBack }: Level2Props) {
             top: s(10),
             left: s(10),
             zIndex: 60,
-            padding: `${s(8)}px ${s(14)}px`,
-            background: "linear-gradient(135deg,rgb(30,58,138),rgb(37,99,235))",
-            border: "2px solid rgba(147,197,253,0.7)",
-            borderRadius: s(6),
-            color: "#fff",
-            fontWeight: 700,
+            background: "transparent",
+            border: "none",
+            padding: 0,
             cursor: "pointer",
             touchAction: "none",
             userSelect: "none",
-            boxShadow:
-              "rgba(37,99,235,0.5) 0px 4px 14px, rgba(255,255,255,0.15) 0px 1px 0px inset",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            flexDirection: "column",
-            gap: s(2),
           }}
         >
-          <span style={{ fontSize: s(14), lineHeight: 1 }}>←</span>
-          <span
-            style={{
-              fontSize: s(12),
-              fontWeight: 700,
-              letterSpacing: 0.5,
-              fontFamily: '"Cubic11", "Courier New", Courier, monospace',
-            }}
-          >
-            返回大廳
-          </span>
+          <img
+            src={`${import.meta.env.BASE_URL}sprites/backto.png`}
+            alt="返回大廳"
+            draggable={false}
+            style={{ height: s(48), objectFit: "contain" }}
+          />
         </button>
       )}
 
