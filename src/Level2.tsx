@@ -217,9 +217,12 @@ DECOYS.forEach(({ idleImg, mirrorImg, flyImg }) => {
 });
 
 // Chases the taxi/wheelchair off screen when it catches the wrong decoy —
-// see the chase branch in drawSideTargets.
+// see the chase branch in drawSideTargets. police-2.png is used specifically
+// when 女友 gets wrongly put in the wheelchair; police.png otherwise.
 const POLICE_IMG = new Image();
 POLICE_IMG.src = `${import.meta.env.BASE_URL}sprites/stage2/police.png`;
+const POLICE2_IMG = new Image();
+POLICE2_IMG.src = `${import.meta.env.BASE_URL}sprites/stage2/police-2.png`;
 
 // ─── Ambient background cameo ───────────────────────────────────────────────
 // Purely decorative walking character — appears the instant the player picks
@@ -509,6 +512,10 @@ interface SideTargets {
   // of retracting back out the near side (see the chase branch in
   // drawSideTargets). The other, uninvolved target still retracts normally.
   chasedTarget: "taxi" | "wheelchair" | null;
+  // Which decoy triggered the chase (icon key, e.g. "gf"/"grandpa") — 女友
+  // wrongly put in the wheelchair gets chased by police-2.png instead of the
+  // usual police.png (see the chase branch in drawSideTargets).
+  chaseDecoyIcon: string | null;
 }
 
 interface GameState {
@@ -634,6 +641,7 @@ function revealDecoy(gs: GameState, slot: number, now: number) {
     taxiOccupantImg: null,
     wheelchairOccupantImg: null,
     chasedTarget: null,
+    chaseDecoyIcon: null,
   };
   if (!gs.decoyHintShownEver) {
     gs.decoyHintShownEver = true;
@@ -864,6 +872,7 @@ function checkThrowLanding(
         // Wrong target — that one flees chased by police.png instead of
         // retracting normally (see the chase branch in drawSideTargets).
         gs.sideTargets.chasedTarget = hitTarget;
+        gs.sideTargets.chaseDecoyIcon = it.icon;
       }
       resolveActiveDecoy(gs, now, isCorrect ? "correct" : "wrong");
       return { hit: true, correct: isCorrect };
@@ -1839,6 +1848,11 @@ function drawSideTargets(
     const flashing = now < st.flashUntil && st.flashTarget === targetKind;
 
     if (isChased) {
+      // 女友被誤丟到輪椅時，追在後面的換成 police-2.png；其他情況用一般的 police.png。
+      const policeImg =
+        st.chaseDecoyIcon === "gf" && targetKind === "wheelchair"
+          ? POLICE2_IMG
+          : POLICE_IMG;
       const policeX =
         x - (mirror ? 1 : -1) * SIDE_TARGET_SIZE * SIDE_TARGET_CHASE_GAP_RATIO;
       ctx.save();
@@ -1846,7 +1860,7 @@ function drawSideTargets(
       if (mirror) ctx.scale(-1, 1);
       drawSpriteImg(
         ctx,
-        POLICE_IMG,
+        policeImg,
         SIDE_TARGET_SIZE * SIDE_TARGET_CHASE_POLICE_SIZE_RATIO,
       );
       ctx.restore();
