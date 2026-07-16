@@ -456,10 +456,10 @@ function drawObstacles(ctx: CanvasRenderingContext2D, obstacles: Obstacle[]) {
           fH * (_frameImg.naturalWidth / _frameImg.naturalHeight),
         );
         if (obs.struck) {
-          // Knocked over — lie the railing flat on the ground
+          // Knocked over — topple forward (to the right, the run direction)
           ctx.save();
           ctx.translate(obs.x, floorY + 12);
-          ctx.rotate(-Math.PI / 2);
+          ctx.rotate(Math.PI / 2);
           ctx.drawImage(_frameImg, -fW / 2, -fH, fW, fH);
           ctx.restore();
         } else {
@@ -721,9 +721,15 @@ function update(gs: GameState, now: number, dt: number) {
     checkCollisions(gs, now);
   }
 
-  // Snap events — never spawn a new one while another is still on screen,
-  // so the photographer and cheerleader never overlap at centre.
-  if (gs.elapsed >= gs.nextSnapAt && gs.snapEvents.length === 0) {
+  // Snap events — never spawn a new one while another is still on screen or
+  // while its screen-blocking effect (flash / flag) is still playing out, so
+  // the photographer and cheerleader never overlap or chain back-to-back.
+  if (
+    gs.elapsed >= gs.nextSnapAt &&
+    gs.snapEvents.length === 0 &&
+    !gs.whiteFlash &&
+    !gs.flagBlock
+  ) {
     const snapType: SnapType =
       Math.random() < 0.5 ? "photographer" : "cheerleader";
     gs.snapEvents.push({
@@ -735,25 +741,34 @@ function update(gs: GameState, now: number, dt: number) {
       cheerVariant:
         snapType === "cheerleader" ? (Math.random() < 0.5 ? 1 : 2) : undefined,
     });
-    gs.nextSnapAt = gs.elapsed + rng3(SNAP_MIN_MS, SNAP_MAX_MS);
     gs.evtDirty = true;
   }
 
   const prevLen = gs.snapEvents.length;
   gs.snapEvents = gs.snapEvents.filter((e) => {
-    if (e.dismissed) return false;
+    if (e.dismissed) {
+      // Clicked away in time — no effect; wait a full gap before the next one.
+      gs.nextSnapAt = gs.elapsed + rng3(SNAP_MIN_MS, SNAP_MAX_MS);
+      return false;
+    }
     if (now - e.spawnAt > SNAP_CLICK_MS) {
+      let effectMs: number;
       if (e.type === "photographer") {
         gs.whiteFlash = true;
         gs.whiteFlashUntil = now + WHITE_FLASH_MS;
+        effectMs = WHITE_FLASH_MS;
         sfxSnap();
         addPopup(gs, LW / 2, LH / 2, "閃光！視線模糊", "#fff", now);
       } else {
         gs.flagBlock = true;
         gs.flagBlockUntil = now + FLAG_BLOCK_MS;
         gs.flagColor = Math.random() < 0.5 ? "blue" : "yellow";
+        effectMs = FLAG_BLOCK_MS;
         addPopup(gs, LW / 2, LH / 2 - 40, "旗子擋住畫面！", "#ff6600", now);
       }
+      // Only count the gap to the next distraction once this one's effect
+      // has fully cleared, so distractions never appear consecutively.
+      gs.nextSnapAt = gs.elapsed + effectMs + rng3(SNAP_MIN_MS, SNAP_MAX_MS);
       gs.evtDirty = true;
       return false;
     }
@@ -1285,7 +1300,7 @@ export default function Level3({ onBack }: LevelProps) {
                 flexDirection: "column",
                 alignItems: "center",
                 gap: s(4),
-                animation: `${evt.side === "left" ? "snapSlideFromLeft" : "snapSlideFromRight"} 0.6s ease-out forwards, snapSway 2.2s ease-in-out 0.6s infinite`,
+                animation: `${evt.side === "left" ? "snapSlideFromLeft" : "snapSlideFromRight"} 0.6s ease-out forwards, snapSway 3s ease-in-out 0.6s infinite`,
               }}
             >
               {/* Canvas-rendered pixel bubble — identical to GameCanvas drawPixelBox */}
@@ -1314,7 +1329,7 @@ export default function Level3({ onBack }: LevelProps) {
                 alignItems: "center",
                 gap: s(4),
                 marginTop: s(-100),
-                animation: `${evt.side === "left" ? "snapSlideFromLeft" : "snapSlideFromRight"} 0.6s ease-out forwards, snapSway 1.6s ease-in-out 0.6s infinite`,
+                animation: `${evt.side === "left" ? "snapSlideFromLeft" : "snapSlideFromRight"} 0.6s ease-out forwards, snapSway 2s ease-in-out 0.6s infinite`,
               }}
             >
               {/* Canvas-rendered pixel bubble — same as the photographer */}

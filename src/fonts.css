@@ -34,10 +34,10 @@ body,
     transform: translateX(calc(-50% + 0px));
   }
   25% {
-    transform: translateX(calc(-50% + 300px));
+    transform: translateX(calc(-50% + 400px));
   }
   75% {
-    transform: translateX(calc(-50% - 300px));
+    transform: translateX(calc(-50% - 400px));
   }
   100% {
     transform: translateX(calc(-50% + 0px));
