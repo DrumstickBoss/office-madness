@@ -11,3 +11,35 @@ body,
 #root {
   font-family: "Cubic11", sans-serif;
 }
+
+@keyframes snapSlideFromLeft {
+  from {
+    transform: translateX(-1000px);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+@keyframes snapSlideFromRight {
+  from {
+    transform: translateX(1000px);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+/* Slight left-right sway after arriving centre — makes tapping harder */
+@keyframes snapSway {
+  0% {
+    transform: translateX(calc(-50% + 0px));
+  }
+  25% {
+    transform: translateX(calc(-50% + 300px));
+  }
+  75% {
+    transform: translateX(calc(-50% - 300px));
+  }
+  100% {
+    transform: translateX(calc(-50% + 0px));
+  }
+}
