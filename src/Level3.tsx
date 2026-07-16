@@ -854,6 +854,7 @@ export default function Level3({ onBack }: LevelProps) {
   const upHeldAtRef = useRef(0);
   const playerRunImgRef = useRef<HTMLImageElement>(null);
   const playerJumpImgRef = useRef<HTMLImageElement>(null);
+  const playerFallenImgRef = useRef<HTMLImageElement>(null);
   const bgVideoRef = useRef<HTMLVideoElement>(null);
   const exitConfirmRef = useRef(false);
 
@@ -1057,7 +1058,8 @@ export default function Level3({ onBack }: LevelProps) {
       // Update DOM player sprite (GIF animates only in DOM, not canvas drawImage)
       const runEl = playerRunImgRef.current;
       const jumpEl = playerJumpImgRef.current;
-      if (runEl && jumpEl) {
+      const fallenEl = playerFallenImgRef.current;
+      if (runEl && jumpEl && fallenEl) {
         const cx_s = (Math.round(LW * PLAYER_X_FRAC) + PLAYER_W / 2) * GS;
         // Jump is shown by lifting the run sprite along its arc (playerY),
         // not by swapping to a separate jump image.
@@ -1065,17 +1067,17 @@ export default function Level3({ onBack }: LevelProps) {
         const h_s = (PLAYER_H + 60) * GS;
         const fallen = gs.playerState === "fallen";
         const hidden = gs.status !== "playing";
-        runEl.style.display = hidden ? "none" : "block";
+        // While frozen after tripping, swap to the dedicated fallen sprite.
+        runEl.style.display = hidden || fallen ? "none" : "block";
         jumpEl.style.display = "none";
-        // Keep the same run sprite while frozen, just blink it.
-        const blink = fallen && Math.floor(gs.elapsed / 80) % 2 === 0;
-        runEl.style.opacity = blink ? "0.35" : "1";
+        fallenEl.style.display = hidden || !fallen ? "none" : "block";
+        runEl.style.opacity = "1";
         // White halo while invincible (speed boost active).
         const boosted = ts < gs.speedBoostUntil;
         const glow = boosted
           ? "drop-shadow(0 0 6px rgba(255,255,255,0.95)) drop-shadow(0 0 16px rgba(255,255,255,0.85))"
           : "none";
-        for (const el of [runEl, jumpEl]) {
+        for (const el of [runEl, jumpEl, fallenEl]) {
           el.style.height = `${h_s}px`;
           el.style.width = "auto";
           el.style.left = `${cx_s}px`;
@@ -1195,6 +1197,19 @@ export default function Level3({ onBack }: LevelProps) {
       <img
         ref={playerJumpImgRef}
         src={`${import.meta.env.BASE_URL}sprites/stage3/jump.gif`}
+        alt=""
+        style={{
+          position: "absolute",
+          pointerEvents: "none",
+          display: "none",
+          zIndex: 5,
+          imageRendering: "pixelated",
+        }}
+      />
+      {/* Fallen sprite — shown while player is frozen after tripping */}
+      <img
+        ref={playerFallenImgRef}
+        src={`${import.meta.env.BASE_URL}sprites/stage3/pudau.gif`}
         alt=""
         style={{
           position: "absolute",
