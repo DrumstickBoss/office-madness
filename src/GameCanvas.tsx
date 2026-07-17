@@ -18,21 +18,37 @@ const isPortraitViewport = () =>
 let CW = typeof window !== "undefined" ? window.innerWidth : 390;
 let CH = typeof window !== "undefined" ? window.innerHeight : 700;
 
-// Logical game coordinate space (fixed reference, same as before)
+// Logical game coordinate space. GS (game scale) is derived from a base design
+// size, but LW/LH are then set to the FULL visible canvas (CW/GS × CH/GS) so the
+// play area — player movement and item spawns — spans edge to edge with no side
+// gaps on wide / maximized windows. See computeDims() in the resize effect.
 const _p0 = typeof window !== "undefined" && isPortraitViewport();
-let LW = _p0 ? 390 : 720; // logical width
-let GS = typeof window !== "undefined" ? window.innerWidth / LW : 1; // game scale
-let LH =
+const _baseW0 = _p0 ? 390 : 720;
+const _baseH0 = _p0 ? 700 : 480;
+let GS =
   typeof window !== "undefined"
-    ? Math.round(window.innerHeight / GS)
-    : _p0
-      ? 700
-      : 480;
+    ? _p0
+      ? CW / _baseW0
+      : Math.min(CW / _baseW0, CH / _baseH0)
+    : 1;
+let LW = typeof window !== "undefined" ? Math.round(CW / GS) : _baseW0; // full-width logical
+let LH = typeof window !== "undefined" ? Math.round(CH / GS) : _baseH0;
 
 // ─── Game tuning ─────────────────────────────────────────────────────────────
-const PLAYER_W = 72;
-const PLAYER_H = 88;
-const ITEM_SIZE = 44;
+const PLAYER_W = 108;
+const PLAYER_H = 132;
+const ITEM_SIZE = 66;
+
+// Player's vertical position (returns the sprite's top-left Y). The scene art
+// is laid out full-width and centred vertically, so it occupies a 16:9 band
+// rather than the whole window — the player is placed against that band, not
+// the window, so he holds his spot on the art at any window size:
+//   centre = bandBottom - bandH * PLAYER_FRAC = LH/2 + bandH * (0.5 - FRAC)
+// Lower PLAYER_FRAC moves him down the band; raise it to move him up.
+const BG_RATIO = 9 / 16;
+const PLAYER_FRAC = 0.36;
+const playerTopY = () =>
+  Math.round(LH / 2 + LW * BG_RATIO * (0.5 - PLAYER_FRAC) - PLAYER_H / 2);
 const ITEM_SPAWN_MS = 1200;
 const CALL_SPAWN_MS = 10_000;
 const CALL_TIMEOUT_MS = 3000; // seconds before call auto-expires
@@ -708,7 +724,9 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
     gsRef.current.lastFrameTs = now;
     // BGM：節奏從 120 BPM 線性加速到 200 BPM（60 秒後達到最快）
     stopGame1Bgm();
-    startGame1Bgm(() => Math.min(128 + 47 * (gsRef.current.elapsed / GAME_DURATION_MS), 175));
+    startGame1Bgm(() =>
+      Math.min(128 + 47 * (gsRef.current.elapsed / GAME_DURATION_MS), 175),
+    );
     if (char === "shield")
       gsRef.current.nextShieldTime = now + SHIELD_RECHARGE_MS;
     setGameStatus("playing");
@@ -817,7 +835,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
     }
 
     // Move items & check collision
-    const playerTop = LH - 60 - PLAYER_H;
+    const playerTop = playerTopY();
     const playerLeft = gs.playerX;
     const playerRight = gs.playerX + PLAYER_W;
 
@@ -948,7 +966,7 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
       }
 
       // Player
-      const playerY = LH - 60 - PLAYER_H;
+      const playerY = playerTopY();
       drawPlayer(ctx, gs.playerX, playerY, gs.fat, gs.frozen);
 
       // Fat indicator above player
@@ -1093,15 +1111,24 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
   useEffect(() => {
     const canVibrate = typeof navigator !== "undefined" && !!navigator.vibrate;
     if (!canVibrate || calls.length === 0) {
-      if (canVibrate) try { navigator.vibrate(0) } catch {}
+      if (canVibrate)
+        try {
+          navigator.vibrate(0);
+        } catch {}
       return;
     }
-    const pulse = () => { try { navigator.vibrate([150, 180]) } catch {} };
+    const pulse = () => {
+      try {
+        navigator.vibrate([150, 180]);
+      } catch {}
+    };
     pulse();
     const id = setInterval(pulse, 330);
     return () => {
       clearInterval(id);
-      try { navigator.vibrate(0) } catch {}
+      try {
+        navigator.vibrate(0);
+      } catch {}
     };
   }, [calls.length > 0]);
 
@@ -1111,8 +1138,12 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
       const p = isPortraitViewport();
       CW = window.innerWidth;
       CH = window.innerHeight;
-      LW = p ? 390 : 720;
-      GS = p ? CW / LW : Math.min(CW / LW, CH / (p ? 700 : 480));
+      const baseW = p ? 390 : 720;
+      const baseH = p ? 700 : 480;
+      // Scale from the base design size, then let the logical space fill the whole
+      // canvas so the play area is left-right full width (no side gaps).
+      GS = p ? CW / baseW : Math.min(CW / baseW, CH / baseH);
+      LW = Math.round(CW / GS);
       LH = Math.round(CH / GS);
       if (canvasRef.current) {
         canvasRef.current.width = CW;
@@ -1125,6 +1156,11 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
       setVpW(window.innerWidth);
       setVpH(window.innerHeight);
     };
+    // Run once on mount so the canvas is sized/scaled for the CURRENT window
+    // (the module-level CW/GS/LH are only computed at import time and lack the
+    // landscape height-clamp), matching Level 2 / Level 3. Without this, Level 1
+    // renders at a stale scale until the window is manually resized ("跑版").
+    onResize();
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
@@ -1871,7 +1907,8 @@ export default function GameCanvas({ onBack }: GameCanvasProps) {
                       background: "rgba(5,15,40,0.92)",
                       border: "2px solid rgb(30,58,110)",
                       borderRadius: s(8),
-                      fontFamily: '"Cubic11", "Courier New", Courier, monospace',
+                      fontFamily:
+                        '"Cubic11", "Courier New", Courier, monospace',
                       boxShadow:
                         "rgba(0,0,0,0.7) 0px 4px 16px, rgba(100,160,255,0.08) 0px 1px 0px inset",
                       color: "#fff",

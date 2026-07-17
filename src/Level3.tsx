@@ -28,16 +28,28 @@ const SNAP_MAX_MS = 9000;
 const SNAP_CLICK_MS = 3000;
 const WHITE_FLASH_MS = 3000;
 const FLAG_BLOCK_MS = 2000;
+const FLAG_FADE_MS = 600;
 const SCORE_PER_SEC = 8;
 const SCORE_OBS_DODGE = 10;
 const SPEED_BOOST_MS = 4000; // powerup duration
 const SPEED_MULT = 1.65; // scroll / obstacle speed multiplier when boosted
 
-const FLOOR_Y = () => LH - 90;
+// The scene art (stage3-bg.mp4, 1280x720) is laid out full-width and centred
+// vertically, so it occupies a 16:9 band rather than the whole window. The
+// running track sits a little under a third of the way up from that band's
+// bottom edge. Player, obstacles and powerups all derive from this one line,
+// so they stay locked to the track together at any window size.
+// Lower FLOOR_FRAC moves everything down the track; raise it to move up.
+const BG_RATIO = 9 / 16;
+const FLOOR_FRAC = 0.28;
+const FLOOR_Y = () => LH / 2 + LW * BG_RATIO * (0.5 - FLOOR_FRAC);
 
 const PLAYER_X_FRAC = 0.2;
 const PLAYER_W = 40;
 const PLAYER_H = 66;
+// The fallen sprite reads smaller than the running one at the same height, so
+// it gets a slight bump to stay visually consistent.
+const FALLEN_SCALE = 1.15;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type Status = "idle" | "playing" | "gameover";
@@ -103,7 +115,8 @@ interface GameState {
   whiteFlashUntil: number;
   flagBlock: boolean;
   flagBlockUntil: number;
-  flagColor: "blue" | "yellow";
+  flagFading: boolean;
+  flagFadeUntil: number;
   // Powerup
   speedBoostUntil: number;
   jumpImgUntil: number;
@@ -251,7 +264,8 @@ function makeState(): GameState {
     whiteFlashUntil: 0,
     flagBlock: false,
     flagBlockUntil: 0,
-    flagColor: "blue",
+    flagFading: false,
+    flagFadeUntil: 0,
     speedBoostUntil: 0,
     jumpImgUntil: 0,
     firstObstacleSeen: false,
@@ -670,7 +684,8 @@ function update(gs: GameState, now: number, dt: number) {
     gs.elapsed >= gs.nextSnapAt &&
     gs.snapEvents.length === 0 &&
     !gs.whiteFlash &&
-    !gs.flagBlock
+    !gs.flagBlock &&
+    !gs.flagFading
   ) {
     const snapType: SnapType =
       Math.random() < 0.5 ? "photographer" : "cheerleader";
@@ -700,13 +715,10 @@ function update(gs: GameState, now: number, dt: number) {
         gs.whiteFlashUntil = now + WHITE_FLASH_MS;
         effectMs = WHITE_FLASH_MS;
         sfxSnap();
-        addPopup(gs, LW / 2, LH / 2, "閃光！視線模糊", "#fff", now);
       } else {
         gs.flagBlock = true;
         gs.flagBlockUntil = now + FLAG_BLOCK_MS;
-        gs.flagColor = Math.random() < 0.5 ? "blue" : "yellow";
-        effectMs = FLAG_BLOCK_MS;
-        addPopup(gs, LW / 2, LH / 2 - 40, "旗子擋住畫面！", "#ff6600", now);
+        effectMs = FLAG_BLOCK_MS + FLAG_FADE_MS;
       }
       // Only count the gap to the next distraction once this one's effect
       // has fully cleared, so distractions never appear consecutively.
@@ -724,6 +736,12 @@ function update(gs: GameState, now: number, dt: number) {
   }
   if (gs.flagBlock && now >= gs.flagBlockUntil) {
     gs.flagBlock = false;
+    gs.flagFading = true;
+    gs.flagFadeUntil = now + FLAG_FADE_MS;
+    gs.evtDirty = true;
+  }
+  if (gs.flagFading && now >= gs.flagFadeUntil) {
+    gs.flagFading = false;
     gs.evtDirty = true;
   }
 
@@ -798,7 +816,7 @@ interface UiState {
   snapEvents: SnapEvent[];
   whiteFlash: boolean;
   flagBlock: boolean;
-  flagColor: "blue" | "yellow";
+  flagFading: boolean;
   speedBoosted: boolean;
   speedBoostSecsLeft: number;
   upHeldMs: number;
@@ -823,7 +841,7 @@ export default function Level3({ onBack }: LevelProps) {
     snapEvents: [],
     whiteFlash: false,
     flagBlock: false,
-    flagColor: "blue",
+    flagFading: false,
     speedBoosted: false,
     speedBoostSecsLeft: 0,
     upHeldMs: 0,
@@ -838,6 +856,21 @@ export default function Level3({ onBack }: LevelProps) {
 
   const uiScale = Math.min(1.6, Math.max(0.65, Math.min(vpW, vpH) / 480));
   const s = (n: number) => Math.round(n * uiScale);
+
+  // On-screen height of the player sprite, mirroring the render loop's own
+  // `(PLAYER_H + 60) * GS`. The photographer and cheerleader size off this so
+  // they read as the same scale of person as the player, rather than following
+  // the HUD's uiScale.
+  const playerPx = Math.round(
+    (PLAYER_H + 60) * (vpW / (vpW < vpH ? 390 : 720)),
+  );
+  // The photographer and cheerleader stand back from the player, so they read
+  // a little smaller than him rather than matching him exactly.
+  const camPx = Math.round(playerPx * 0.85);
+  // The cheerleader art only fills ~83% of its square frame (the rest is
+  // padding), so the same box height leaves her reading smaller than the
+  // photographer — this bumps her back up to match.
+  const cheerPx = Math.round(camPx * 1.45);
 
   const font = '"Cubic11","Courier New",Courier,monospace';
   const panelBase: React.CSSProperties = {
@@ -884,7 +917,7 @@ export default function Level3({ onBack }: LevelProps) {
       snapEvents: [],
       whiteFlash: false,
       flagBlock: false,
-      flagColor: "blue",
+      flagFading: false,
       speedBoosted: false,
       speedBoostSecsLeft: 0,
       upHeldMs: 0,
@@ -1042,6 +1075,7 @@ export default function Level3({ onBack }: LevelProps) {
           el.style.transform = "translateX(-50%)";
           el.style.filter = glow;
         }
+        fallenEl.style.height = `${h_s * FALLEN_SCALE}px`;
       }
 
       if (upHeldAtRef.current > 0) gs.evtDirty = true;
@@ -1057,7 +1091,7 @@ export default function Level3({ onBack }: LevelProps) {
           snapEvents: [...gs.snapEvents],
           whiteFlash: gs.whiteFlash,
           flagBlock: gs.flagBlock,
-          flagColor: gs.flagColor,
+          flagFading: gs.flagFading,
           speedBoosted: now < gs.speedBoostUntil,
           speedBoostSecsLeft: Math.max(
             0,
@@ -1115,10 +1149,12 @@ export default function Level3({ onBack }: LevelProps) {
         playsInline
         style={{
           position: "absolute",
-          inset: 0,
+          top: "50%",
+          left: 0,
           width: "100%",
-          height: "100%",
-          objectFit: "cover",
+          height: "auto",
+          transform: "translateY(-50%)",
+          display: "block",
           pointerEvents: "none",
           filter: "brightness(1.3) contrast(1.1)",
         }}
@@ -1191,35 +1227,28 @@ export default function Level3({ onBack }: LevelProps) {
         />
       )}
 
-      {/* Flag block — flag alone enlarged to cover the whole screen.
-          Wrapped in an overflow-hidden layer so the shifted flag is clipped. */}
-      {isPlaying && ui.flagBlock && (
-        <div
+      {/* Flag block — cracker laid out with the exact geometry as the
+          background video above. Both sources are 16:9, so the poppers land
+          flush with the scene band: full width, no stretching, no cropping. */}
+      {isPlaying && (ui.flagBlock || ui.flagFading) && (
+        <img
+          src={`${import.meta.env.BASE_URL}sprites/stage3/cracker.gif`}
+          alt=""
+          draggable={false}
           style={{
             position: "absolute",
-            inset: 0,
-            overflow: "hidden",
+            top: "50%",
+            left: 0,
+            width: "100%",
+            height: "auto",
+            transform: "translateY(-50%)",
+            display: "block",
             pointerEvents: "none",
             zIndex: 15,
+            opacity: ui.flagFading ? 0 : 1,
+            transition: `opacity ${FLAG_FADE_MS}ms ease-out`,
           }}
-        >
-          <img
-            src={`${import.meta.env.BASE_URL}sprites/stage3/flag-${ui.flagColor}.gif`}
-            alt=""
-            draggable={false}
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              width: "100%",
-              height: `calc(100% + ${s(100)}px)`,
-              objectFit: "cover",
-              objectPosition: "center top",
-              pointerEvents: "none",
-              transform: `translateY(${s(-100)}px)`,
-            }}
-          />
-        </div>
+        />
       )}
 
       {/* Snap event overlays */}
@@ -1250,7 +1279,7 @@ export default function Level3({ onBack }: LevelProps) {
               <img
                 src={`${import.meta.env.BASE_URL}sprites/stage3/camera.gif`}
                 alt=""
-                style={{ width: s(200), height: s(200), objectFit: "contain" }}
+                style={{ height: camPx, width: "auto", objectFit: "contain" }}
               />
             </div>
           ) : (
@@ -1270,23 +1299,31 @@ export default function Level3({ onBack }: LevelProps) {
                 flexDirection: "column",
                 alignItems: "center",
                 gap: s(4),
-                marginTop: s(-100),
+                // She is taller than the photographer, and the column is
+                // top-anchored, so lift the whole block by the difference:
+                // this bottom-aligns the two characters while leaving the
+                // bubble to sit naturally above her head, as his does.
+                marginTop: camPx - cheerPx,
                 animation: `${evt.side === "left" ? "snapSlideFromLeft" : "snapSlideFromRight"} 0.6s ease-out forwards, snapSway 2s ease-in-out 0.6s infinite`,
               }}
             >
-              {/* Canvas-rendered pixel bubble — same as the photographer */}
+              {/* Canvas-rendered pixel bubble — same as the photographer, but
+                  nudged down: her art carries transparent padding above the
+                  flags, so a bubble sitting flush against the frame's top edge
+                  floats well clear of her head. Scales with her so it holds at
+                  any window size. */}
               <canvas
                 ref={drawCamBubble}
                 style={{
                   display: "block",
-                  transform: `translateY(${s(60)}px)`,
+                  transform: `translateY(${Math.round(cheerPx * 0.12)}px)`,
                 }}
               />
               <img
                 src={`${import.meta.env.BASE_URL}sprites/stage3/cheer-0${evt.cheerVariant ?? 1}.gif`}
                 alt=""
                 draggable={false}
-                style={{ width: s(300), height: s(300), objectFit: "contain" }}
+                style={{ height: cheerPx, width: "auto", objectFit: "contain" }}
               />
             </div>
           ),
